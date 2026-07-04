@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MewCode 项目架构图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 24px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    margin-bottom: 8px;
+    color: #58a6ff;
+  }
+  .subtitle {
+    text-align: center;
+    color: #8b949e;
+    margin-bottom: 32px;
+    font-size: 14px;
+  }
+  .section {
+    max-width: 1200px;
+    margin: 0 auto 40px auto;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 24px;
+  }
+  .section h2 {
+    font-size: 18px;
+    color: #f0f6fc;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #30363d;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+    overflow-x: auto;
+  }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    justify-content: center;
+    margin-top: 16px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #8b949e;
+  }
+  .legend-dot {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<h1>🐱 MewCode 项目架构图</h1>
+<p class="subtitle">终端 AI 编程助手 — Python 实现 | 版本 0.2.0</p>
+
+<!-- ==================== 总览 ==================== -->
+<div class="section">
+  <h2>一、系统总览 — 顶层架构</h2>
+  <div class="mermaid">
+flowchart TB
+    CLI["__main__.py<br/>命令行入口"]
+    CONFIG["config.py<br/>YAML 配置加载<br/>(用户→项目→本地 三层合并)"]
+    HOOKS["hooks/<br/>生命周期钩子引擎"]
+
+    CLI --> CONFIG
+    CLI --> HOOKS
+
+    CLI -->|"默认"| TUI["app.py<br/>Textual TUI"]
+    CLI -->|"-p"| PIPE["__main__:_run_prompt<br/>非交互管道模式"]
+    CLI -->|"--remote"| REMOTE["remote.py<br/>WebSocket 远程服务器"]
+
+    TUI --> AGENT["agent.py<br/>Agent 主循环"]
+    PIPE --> AGENT
+    REMOTE --> AGENT
+
+    AGENT --> CLIENT["client.py<br/>LLM 客户端抽象层"]
+    AGENT --> TOOLS["tools/<br/>工具注册表"]
+    AGENT --> PERM["permissions/<br/>权限系统"]
+    AGENT --> CTX["context/<br/>上下文管理 + 压缩"]
+    AGENT --> CONV["conversation.py<br/>对话管理器"]
+    AGENT --> MEM["memory/<br/>记忆系统"]
+
+    CLIENT --> ANTH["AnthropicClient<br/>Anthropic SDK"]
+    CLIENT --> OA["OpenAIClient<br/>Responses API"]
+    CLIENT --> OAC["OpenAICompatClient<br/>Chat Completions"]
+
+    style CLI fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style AGENT fill:#d73a49,stroke:#f97583,color:#fff
+    style TUI fill:#0366d6,stroke:#58a6ff,color:#fff
+    style PIPE fill:#0366d6,stroke:#58a6ff,color:#fff
+    style REMOTE fill:#0366d6,stroke:#58a6ff,color:#fff
+    style CLIENT fill:#22863a,stroke:#3fb950,color:#fff
+  </div>
+</div>
+
+<!-- ==================== Agent 主循环 ==================== -->
+<div class="section">
+  <h2>二、Agent 主循环 — 核心流程</h2>
+  <div class="mermaid">
+flowchart TD
+    START(("启动")) --> INJECT["注入环境上下文<br/>+ 长期记忆<br/>+ skill catalog<br/>+ agent catalog"]
+    INJECT --> SYSTEM["构建系统提示词<br/>system_prompt"]
+    SYSTEM --> PREHOOK["Hook: turn_start<br/>Hook: pre_send"]
+
+    PREHOOK --> STREAM["流式调用 LLM<br/>client.stream()"]
+
+    STREAM -->|"TextDelta"| TEXT["累积文本输出<br/>→ StreamText 事件"]
+    STREAM -->|"ThinkingDelta"| THINK["思考过程<br/>→ ThinkingText 事件"]
+    STREAM -->|"ToolCallComplete"| TOOLUSE["工具调用<br/>→ ToolUseEvent 事件"]
+    STREAM -->|"StreamEnd"| USAGE["用量统计<br/>→ UsageEvent 事件"]
+
+    TEXT --> CHECK{"有工具调用?"}
+    THINK --> CHECK
+    USAGE --> CHECK
+
+    CHECK -->|"无"| LOOPDONE["记录助手消息<br/>→ LoopComplete"]
+    LOOPDONE --> ENDHOOK["Hook: turn_end<br/>Hook: session_end"]
+    ENDHOOK --> EXTRACT["每5轮触发<br/>记忆自动提取"]
+    EXTRACT --> DONE(("结束"))
+
+    CHECK -->|"有"| BATCH["工具调用分区<br/>并发安全? → 并行batch<br/>不安全? → 串行执行"]
+
+    BATCH --> EXEC["逐个/批量执行工具"]
+
+    EXEC --> PERMCHECK{"权限检查"}
+    PERMCHECK -->|"deny"| DENIED["返回错误结果"]
+    PERMCHECK -->|"ask"| ASK["向UI层请求用户确认<br/>→ PermissionRequest 事件"]
+    PERMCHECK -->|"allow"| RUN["执行工具<br/>pydantic 参数校验"]
+
+    ASK -->|"用户批准"| RUN
+    ASK -->|"用户拒绝"| DENIED
+    RUN --> POSTHOOK["Hook: post_tool_use"]
+
+    POSTHOOK --> RESULT["累积工具结果<br/>→ ToolResultEvent 事件"]
+    DENIED --> RESULT
+
+    RESULT --> TURN["标记 TurnComplete"]
+
+    TURN --> COMPACT{"接近上下文窗口?"}
+    COMPACT -->|"是"| L1["L1: tool-result budget<br/>大结果→文件引用"]
+    L1 --> L2["L2: auto_compact<br/>LLM摘要历史前缀"]
+    L2 --> INJECT
+    COMPACT -->|"否"| NEXT["下一轮迭代"]
+    NEXT --> PREHOOK
+
+    style START fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style DONE fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style STREAM fill:#d73a49,stroke:#f97583,color:#fff
+    style COMPACT fill:#bf8700,stroke:#d29922,color:#fff
+    style L1 fill:#bf8700,stroke:#d29922,color:#fff
+    style L2 fill:#bf8700,stroke:#d29922,color:#fff
+    style PERMCHECK fill:#0366d6,stroke:#58a6ff,color:#fff
+  </div>
+</div>
+
+<!-- ==================== LLM 客户端 ==================== -->
+<div class="section">
+  <h2>三、LLM 客户端 — 多协议支持</h2>
+  <div class="mermaid">
+flowchart LR
+    FACTORY["create_client()<br/>工厂函数"]
+
+    FACTORY -->|"protocol=anthropic"| AC["AnthropicClient"]
+    FACTORY -->|"protocol=openai"| OC["OpenAIClient"]
+    FACTORY -->|"protocol=openai-compat"| OCC["OpenAICompatClient"]
+
+    AC -->|"端点"| AEP["/v1/messages<br/>Anthropic Messages API"]
+    OC -->|"端点"| OEP["/responses<br/>OpenAI Responses API"]
+    OCC -->|"端点"| CEP["/chat/completions<br/>Chat Completions API"]
+
+    AC -->|"特性"| AF["✓ 提示缓存 (ephemeral)<br/>✓ 思考模式 (thinking)<br/>✓ 自适应思考 (4.6+)<br/>✓ 自动拉取 context window<br/>✓ MiniMax 兼容"]
+    OC -->|"特性"| OF["✓ 推理摘要文本<br/>✓ 缓存tokens统计<br/>✓ 函数调用流式"]
+    OCC -->|"特性"| CF["✓ reasoning_content<br/>  (DeepSeek/小米等)<br/>✓ 增量tool call<br/>✓ 广泛兼容(vLLM/Ollama等)"]
+
+    style FACTORY fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style AC fill:#22863a,stroke:#3fb950,color:#fff
+    style OC fill:#22863a,stroke:#3fb950,color:#fff
+    style OCC fill:#22863a,stroke:#3fb950,color:#fff
+    style AF fill:#161b22,stroke:#30363d,color:#8b949e
+    style OF fill:#161b22,stroke:#30363d,color:#8b949e
+    style CF fill:#161b22,stroke:#30363d,color:#8b949e
+  </div>
+</div>
+
+<!-- ==================== 工具系统 ==================== -->
+<div class="section">
+  <h2>四、工具系统</h2>
+  <div class="mermaid">
+flowchart TB
+    REG["ToolRegistry<br/>工具注册表"]
+
+    REG --> CORE["核心工具"]
+    REG --> FS["文件工具"]
+    REG --> SEARCH["搜索工具"]
+    REG --> AGENTT["子Agent工具"]
+    REG --> META["元工具"]
+
+    CORE --> BASH["Bash<br/>(支持OS沙箱)"]
+    FS --> RF["ReadFile"]
+    FS --> WF["WriteFile"]
+    FS --> EF["EditFile"]
+    SEARCH --> GLOB["Glob"]
+    SEARCH --> GREP["Grep"]
+    SEARCH --> WF2["WebFetch"]
+    SEARCH --> WS["WebSearch"]
+
+    AGENTT --> AT["Agent<br/>(后台子Agent)"]
+    AGENTT --> TC["TeamCreate"]
+    AGENTT --> TD["TeamDelete"]
+
+    META --> TS["ToolSearch<br/>(延迟加载工具schema)"]
+    META --> AU["AskUserQuestion"]
+    META --> EP["ExitPlanMode"]
+    META --> EW["EnterWorktree"]
+    META --> XW["ExitWorktree"]
+    META --> LS["LoadSkill"]
+    META --> IS["InstallSkill"]
+    META --> SO["SyntheticOutput"]
+
+    REG --> DEFER["延迟加载机制<br/>部分工具仅通过ToolSearch激活<br/>避免不必要的token开销"]
+
+    style REG fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style DEFER fill:#bf8700,stroke:#d29922,color:#fff
+    style AT fill:#d73a49,stroke:#f97583,color:#fff
+  </div>
+</div>
+
+<!-- ==================== 权限系统 ==================== -->
+<div class="section">
+  <h2>五、权限系统 — 三层判定</h2>
+  <div class="mermaid">
+flowchart LR
+    REQ["工具调用请求"] --> S1["① 路径沙箱<br/>PathSandbox<br/>限制文件操作范围"]
+    S1 --> S2["② 规则引擎<br/>RuleEngine<br/>用户/项目/本地三层规则"]
+    S2 --> S3["③ 权限模式<br/>PermissionMode"]
+
+    S3 --> DEFAULT["default<br/>所有操作需确认"]
+    S3 --> ACCEPT["acceptEdits<br/>自动批准编辑操作"]
+    S3 --> PLAN["plan<br/>仅允许读操作"]
+    S3 --> BYPASS["bypassPermissions<br/>跳过所有确认"]
+
+    S3 -->|"ask"| UI["向UI层发起<br/>PermissionRequest"]
+    UI -->|"allow_always"| PERSIST["持久化规则<br/>写入本地YAML"]
+    UI -->|"allow"| EXEC2["执行"]
+    UI -->|"deny"| REJECT["拒绝"]
+
+    style REQ fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style BYPASS fill:#d73a49,stroke:#f97583,color:#fff
+    style PERSIST fill:#22863a,stroke:#3fb950,color:#fff
+    style S1 fill:#0366d6,stroke:#58a6ff,color:#fff
+    style S2 fill:#0366d6,stroke:#58a6ff,color:#fff
+    style S3 fill:#0366d6,stroke:#58a6ff,color:#fff
+  </div>
+</div>
+
+<!-- ==================== 上下文管理 ==================== -->
+<div class="section">
+  <h2>六、上下文管理 — 双层压缩机制</h2>
+  <div class="mermaid">
+flowchart TD
+    MSG["对话消息列表<br/>ConversationManager"]
+
+    MSG --> ANCHOR["用量锚点机制<br/>API返回真实token数后锚定<br/>之后的消息用字符估算"]
+
+    ANCHOR --> CHECK2{"estimated_tokens<br/>接近 window 上限?"}
+
+    CHECK2 -->|"是"| L1D["▸ L1: tool-result budget"]
+    L1D --> L1DETAIL["单个结果 > 阈值 → 写入磁盘<br/>替换为: 文件路径 + 截断预览<br/>ContentReplacementState 追踪替换记录"]
+
+    L1DETAIL --> L2CHECK{"仍接近窗口上限?"}
+    L2CHECK -->|"是"| L2D["▸ L2: auto_compact"]
+    L2D --> L2DETAIL["调用LLM对对话前缀做摘要<br/>保留尾部N条消息不变<br/>生成 CompactBoundary<br/>(含摘要+原文保留尾部)"]
+
+    L2DETAIL --> RECOVERY["恢复快照<br/>记录最近ReadFile内容<br/>压缩后重新附加到系统提示"]
+
+    L2CHECK -->|"否"| OK["继续正常流程"]
+    CHECK2 -->|"否"| OK
+
+    style MSG fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style L1D fill:#bf8700,stroke:#d29922,color:#fff
+    style L2D fill:#d73a49,stroke:#f97583,color:#fff
+    style L1DETAIL fill:#161b22,stroke:#30363d,color:#8b949e
+    style L2DETAIL fill:#161b22,stroke:#30363d,color:#8b949e
+    style RECOVERY fill:#161b22,stroke:#30363d,color:#8b949e
+  </div>
+</div>
+
+<!-- ==================== 子系统 ==================== -->
+<div class="section">
+  <h2>七、子系统全景</h2>
+  <div class="mermaid">
+flowchart TB
+    subgraph MCP["🔌 MCP 集成"]
+        MCPMGR["MCPManager"]
+        STDIO["stdio 服务器<br/>(子进程)"]
+        HTTP["HTTP 服务器<br/>(远程URL)"]
+        MCPTOOL["工具注册为<br/>mcp__server__tool"]
+        MCPMGR --> STDIO
+        MCPMGR --> HTTP
+        STDIO --> MCPTOOL
+        HTTP --> MCPTOOL
+        MCPMGR --> MCPINSTR["注入服务器指令<br/>到 system reminder"]
+    end
+
+    subgraph WORKTREE["🌲 Worktree 隔离"]
+        WTMGR["WorktreeManager"]
+        WTCREATE["基于 git worktree<br/>创建临时工作目录"]
+        WTLINK["符号链接目录<br/>(node_modules/.venv)"]
+        WTCLEAN["过期清理<br/>(每小时检查, 24h过期)"]
+        WTMGR --> WTCREATE
+        WTMGR --> WTLINK
+        WTMGR --> WTCLEAN
+    end
+
+    subgraph TEAMS["👥 团队协作"]
+        TMGR["TeamManager"]
+        COORD["协调者模式<br/>(任务分发)"]
+        MAILBOX["Agent间消息邮箱"]
+        PROGRESS["TeammateTree<br/>(TUI实时进度)"]
+        TMGR --> COORD
+        TMGR --> MAILBOX
+        TMGR --> PROGRESS
+    end
+
+    subgraph SKILLS["⚡ 技能系统"]
+        SLOADER["SkillLoader<br/>加载 .mewcode/skills/"]
+        SEXEC["SkillExecutor<br/>执行skill逻辑"]
+        BUILTIN["内置skills:<br/>commit / review / test<br/>backend-interview"]
+        SLOADER --> BUILTIN
+        SLOADER --> SEXEC
+    end
+
+    subgraph HOOKS2["🪝 钩子系统"]
+        HENGINE["HookEngine<br/>生命周期事件"]
+        HEVENTS["startup / shutdown<br/>session_start/end<br/>turn_start/end<br/>pre/post_tool_use<br/>pre_send / post_receive"]
+        HENGINE --> HEVENTS
+    end
+
+    subgraph MEMORY2["🧠 记忆系统"]
+        MMGR["MemoryManager"]
+        MEXTRACT["每5轮自动提取<br/>对话→结构化记忆"]
+        MLOAD["启动时加载<br/>MEMORY.md + 记忆文件"]
+        MMGR --> MEXTRACT
+        MMGR --> MLOAD
+    end
+
+    subgraph SESSION["💾 会话持久化"]
+        SMGR["SessionManager"]
+        SSAVE["JSONL 增量写入<br/>.mewcode/sessions/"]
+        SRESUME["恢复历史对话<br/>含 compact_boundary"]
+        SMGR --> SSAVE
+        SMGR --> SRESUME
+    end
+
+    style MCP fill:#161b22,stroke:#0366d6,color:#c9d1d9
+    style WORKTREE fill:#161b22,stroke:#22863a,color:#c9d1d9
+    style TEAMS fill:#161b22,stroke:#6e40c9,color:#c9d1d9
+    style SKILLS fill:#161b22,stroke:#bf8700,color:#c9d1d9
+    style HOOKS2 fill:#161b22,stroke:#d73a49,color:#c9d1d9
+    style MEMORY2 fill:#161b22,stroke:#3fb950,color:#c9d1d9
+    style SESSION fill:#161b22,stroke:#58a6ff,color:#c9d1d9
+  </div>
+</div>
+
+<!-- ==================== 数据流向 ==================== -->
+<div class="section">
+  <h2>八、数据流向 — 一次完整的用户请求</h2>
+  <div class="mermaid">
+sequenceDiagram
+    actor User
+    participant UI as TUI / Remote / Pipe
+    participant Agent as Agent 主循环
+    participant Client as LLM Client
+    participant Tool as 工具注册表
+    participant Perm as 权限系统
+    participant Ctx as 上下文管理
+
+    User->>UI: 输入消息
+    UI->>Agent: conversation.add_user_message()
+
+    Note over Agent: 注入环境上下文 + 长期记忆
+
+    Agent->>Ctx: 检查上下文窗口
+    Ctx-->>Agent: 可能触发 L1/L2 压缩
+
+    Agent->>Agent: 构建系统提示词
+
+    loop 每个 turn
+        Agent->>Client: stream(conversation, system, tools)
+        Client-->>Agent: TextDelta / ThinkingDelta / ToolCallComplete / StreamEnd
+
+        alt 无工具调用
+            Agent->>UI: StreamText → LoopComplete
+        else 有工具调用
+            loop 每个工具
+                Agent->>Perm: 权限检查
+                Perm-->>Agent: deny / ask / allow
+
+                alt ask (需要用户确认)
+                    Agent->>UI: PermissionRequest
+                    UI-->>Agent: PermissionResponse
+                end
+
+                Agent->>Tool: execute(params)
+                Tool-->>Agent: ToolResult
+                Agent->>UI: ToolResultEvent
+            end
+            Agent->>UI: TurnComplete
+        end
+    end
+
+    Agent->>Agent: 记忆提取 (每5轮)
+    Agent->>UI: LoopComplete
+    UI-->>User: 显示回复
+  </div>
+</div>
+
+<!-- ==================== 运行模式对比 ==================== -->
+<div class="section">
+  <h2>九、三种运行模式</h2>
+  <div class="mermaid">
+flowchart LR
+    CLI2["mewcode 命令"]
+
+    CLI2 -->|"默认"| MODE1["🖥️ TUI 模式<br/>Textual 全屏终端UI"]
+    CLI2 -->|"-p 'prompt'"| MODE2["📡 管道模式<br/>非交互执行<br/>支持 text / stream-json 输出"]
+    CLI2 -->|"--remote"| MODE3["🌐 远程模式<br/>WebSocket 服务器<br/>浏览器访问 :18888"]
+
+    MODE1 --> F1["• 交互式对话<br/>• 内联权限弹窗<br/>• 可折叠工具块<br/>• Plan模式审批<br/>• @文件自动补全<br/>• 斜杠命令<br/>• Shift+Tab 切换权限模式<br/>• Ctrl+O 展开/折叠工具"]
+    MODE2 --> F2["• 单次执行<br/>• 自动批准权限<br/>• NDJSON 事件流<br/>• 支持team轮询等待<br/>• 适合脚本/CI集成"]
+    MODE3 --> F3["• 浏览器UI<br/>• WebSocket实时推送<br/>• 权限弹窗→浏览器<br/>• 多客户端广播<br/>• 4MB消息上限<br/>• Ping/Pong保活"]
+
+    style MODE1 fill:#0366d6,stroke:#58a6ff,color:#fff
+    style MODE2 fill:#22863a,stroke:#3fb950,color:#fff
+    style MODE3 fill:#6e40c9,stroke:#9f7aea,color:#fff
+    style F1 fill:#161b22,stroke:#30363d,color:#8b949e
+    style F2 fill:#161b22,stroke:#30363d,color:#8b949e
+    style F3 fill:#161b22,stroke:#30363d,color:#8b949e
+  </div>
+</div>
+
+<div class="section">
+  <h2>目录结构</h2>
+  <div class="mermaid">
+graph LR
+    ROOT["mewcode/"] --> A["__main__.py<br/>入口"]
+    ROOT --> B["agent.py<br/>核心循环"]
+    ROOT --> C["app.py<br/>TUI"]
+    ROOT --> D["client.py<br/>LLM客户端"]
+    ROOT --> E["config.py<br/>配置"]
+    ROOT --> F["conversation.py<br/>对话"]
+    ROOT --> G["remote.py<br/>远程服务器"]
+    ROOT --> H["driver.py<br/>终端驱动"]
+
+    ROOT --> I["tools/<br/>工具实现"]
+    ROOT --> J["commands/<br/>斜杠命令"]
+    ROOT --> K["permissions/<br/>权限系统"]
+    ROOT --> L["context/<br/>上下文管理"]
+    ROOT --> M["memory/<br/>记忆系统"]
+    ROOT --> N["hooks/<br/>钩子系统"]
+    ROOT --> O["mcp/<br/>MCP集成"]
+    ROOT --> P["worktree/<br/>工作树隔离"]
+    ROOT --> Q["teams/<br/>团队协作"]
+    ROOT --> R["skills/<br/>技能插件"]
+    ROOT --> S["agents/<br/>子Agent"]
+    ROOT --> T["sandbox/<br/>OS沙箱"]
+    ROOT --> U["filehistory/<br/>文件历史"]
+    ROOT --> V["serialization.py<br/>序列化"]
+    ROOT --> W["validator.py<br/>配置校验"]
+    ROOT --> X["prompts.py<br/>提示词构建"]
+
+    style ROOT fill:#d73a49,stroke:#f97583,color:#fff
+  </div>
+</div>
+
+<p style="text-align:center;color:#484f58;font-size:12px;margin-top:32px;">
+  MewCode v0.2.0 — 终端 AI 编程助手架构图 — 生成时间 2026-07-01
+</p>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1f6feb',
+      primaryTextColor: '#c9d1d9',
+      primaryBorderColor: '#30363d',
+      lineColor: '#484f58',
+      secondaryColor: '#161b22',
+      tertiaryColor: '#0d1117',
+      fontSize: '13px',
+    },
+    flowchart: {
+      useMaxWidth: true,
+      htmlLabels: true,
+      curve: 'basis',
+    },
+    sequence: {
+      useMaxWidth: true,
+      wrap: true,
+      messageAlign: 'center',
+    },
+  });
+</script>
+
+</body>
+</html>
