@@ -28,7 +28,13 @@ class AgentToolParams(BaseModel):
     model: str | None = None
     run_in_background: bool = False
     name: str | None = None
-    isolation: str | None = None
+    isolation: str | None = Field(
+        default=None,
+        description=(
+            'Set to "worktree" to run the sub-agent in a separate git worktree '
+            "and branch, isolated from the parent working directory."
+        ),
+    )
     team_name: str | None = Field(
         default=None,
         description=(
@@ -61,6 +67,40 @@ TEAMMATE_ADDENDUM = (
     "All file paths you use MUST be relative to your current working directory. "
     "Do NOT use absolute paths from the original project — they are outside your sandbox and will be rejected."
 )
+
+
+def _bind_registry_work_dir(registry: Any, work_dir: str) -> Any:
+    import copy
+
+    from mewcode.tools import ToolRegistry
+
+    bound = ToolRegistry()
+    for tool in registry.list_tools():
+        clone = copy.copy(tool)
+        if hasattr(clone, "work_dir"):
+            clone.work_dir = work_dir
+        bound.register(clone)
+    return bound
+
+
+def _rewrite_parent_paths_for_worktree(prompt: str, parent_dir: str, wt_dir: str) -> str:
+    import re
+    from pathlib import Path
+
+    variants = {
+        parent_dir,
+        str(Path(parent_dir)),
+        str(Path(parent_dir)).replace("\\", "/"),
+    }
+    rewritten = prompt
+    for variant in sorted((v for v in variants if v), key=len, reverse=True):
+        rewritten = re.sub(
+            re.escape(variant),
+            lambda _match: wt_dir,
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+    return rewritten
 
 
 class AgentTool(Tool):
@@ -103,10 +143,15 @@ class AgentTool(Tool):
         if p.team_name:
             return await self._execute_as_teammate(p)
 
-        isolation = ""
+        isolation = (p.isolation or "").strip()
+        if isolation and isolation != "worktree":
+            return ToolResult(
+                output=f"Invalid isolation mode: {isolation}",
+                is_error=True,
+            )
         if p.subagent_type:
             defn = self._agent_loader.get(p.subagent_type)
-            if defn and defn.isolation:
+            if not isolation and defn and defn.isolation:
                 isolation = defn.isolation
 
         if isolation == "worktree":
@@ -193,6 +238,9 @@ class AgentTool(Tool):
             filtered_registry = resolve_agent_tools(
                 _base_registry, definition, is_background
             )
+        filtered_registry = _bind_registry_work_dir(
+            filtered_registry, self._parent_agent.work_dir
+        )
 
         # 为子 agent 创建权限检查器
         pm_str = definition.permission_mode
@@ -390,6 +438,7 @@ class AgentTool(Tool):
             backend_type=backend.value,
             definition=definition,
         )
+        teammate_registry = _bind_registry_work_dir(teammate_registry, wt.path)
         _tm_tools = [t.name for t in teammate_registry.list_tools()]
         log.info("[teammate] result_tools=%d names=%s", len(_tm_tools), _tm_tools)
 
@@ -401,6 +450,8 @@ class AgentTool(Tool):
             sandbox=PathSandbox(wt.path),
             rule_engine=RuleEngine(),
             mode=PermissionMode.BYPASS,
+            enforce_path_sandbox=True,
+            forbidden_paths=[self._parent_agent.work_dir],
         )
 
         sub_agent = AgentClass(
@@ -584,7 +635,12 @@ class AgentTool(Tool):
             )
 
         notice = build_worktree_notice(self._parent_agent.work_dir, wt.path)
-        task = notice + "\n\n" + p.prompt
+        prompt = _rewrite_parent_paths_for_worktree(
+            p.prompt,
+            self._parent_agent.work_dir,
+            wt.path,
+        )
+        task = notice + "\n\n" + prompt
 
         client = self._select_llm(p, definition)
 
@@ -592,8 +648,11 @@ class AgentTool(Tool):
         filtered_registry = resolve_agent_tools(
             _base_registry, definition, False
         )
+        filtered_registry = _bind_registry_work_dir(filtered_registry, wt.path)
 
         pm_str = definition.permission_mode
+        if pm_str == "default":
+            pm_str = "bypassPermissions"
         pm_enum = getattr(
             PermissionMode,
             PERMISSION_MODE_MAP.get(pm_str, "DEFAULT"),
@@ -604,6 +663,8 @@ class AgentTool(Tool):
             sandbox=PathSandbox(wt.path),
             rule_engine=RuleEngine(),
             mode=pm_enum,
+            enforce_path_sandbox=True,
+            forbidden_paths=[self._parent_agent.work_dir],
         )
 
         sub_agent = AgentClass(

@@ -75,6 +75,7 @@ class AgentLoader:
                     max_turns=meta.get("maxTurns") or 200,  # 对齐 Go：未指定时默认 200
                     permission_mode=str(meta.get("permissionMode", "default")),
                     background=bool(meta.get("background", False)),
+                    isolation=str(meta.get("isolation", "")),
                     file_path=None,
                     source="builtin",
                 )

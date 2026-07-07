@@ -21,6 +21,7 @@ The parent agent's working directory is: {parent_cwd}
 IMPORTANT:
 - File paths mentioned in the parent conversation refer to the PARENT directory.
 - You must translate them to your local worktree path before reading or editing.
+- Never pass the parent directory path to ReadFile, EditFile, WriteFile, or Bash commands.
 - Always re-read files before editing — your copy may differ from the parent's version.
 [/WORKTREE CONTEXT]
 """
@@ -40,4 +41,3 @@ def build_worktree_notice(parent_cwd: str, wt_path: str) -> str:
         parent_cwd=parent_cwd,
         wt_path=wt_path,
     )
-

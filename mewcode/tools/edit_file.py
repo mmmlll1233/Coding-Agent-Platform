@@ -31,6 +31,7 @@ class EditFile(Tool):
     )
     params_model = Params
     category = "write"
+    work_dir: str | None = None
 
 
     def __init__(self, file_cache: FileCache | None = None, file_history: Any = None, file_state_cache: FileStateCache | None = None) -> None:
@@ -38,12 +39,17 @@ class EditFile(Tool):
         self.file_history = file_history
         self._state_cache = file_state_cache
 
+    def _resolve_path(self, file_path: str) -> Path:
+        path = Path(file_path)
+        if not path.is_absolute() and self.work_dir:
+            path = Path(self.work_dir) / path
+        return path
 
     async def execute(self, params: Params) -> ToolResult:
         if self.file_history is not None:
             self.file_history.track_edit(params.file_path)
 
-        path = Path(params.file_path)
+        path = self._resolve_path(params.file_path)
         if not path.exists():
             return ToolResult(output=f"Error: file not found: {params.file_path}", is_error=True)
 

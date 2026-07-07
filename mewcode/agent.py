@@ -490,6 +490,7 @@ class Agent:
                 hook_prompts=hook_prompts,
                 coordinator_mode=self.coordinator_mode,
                 agent_catalog=self._agent_catalog_list or None,
+                work_dir=self.work_dir,
             )
 
             if self.plan_mode:
@@ -972,12 +973,15 @@ class Agent:
         path = tc.arguments.get("file_path") if isinstance(tc.arguments, dict) else None
         if not path:
             return
+        file_path = Path(path)
+        if not file_path.is_absolute():
+            file_path = Path(self.work_dir) / file_path
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
         except OSError:
             return
-        self.recovery_state.record_file_read(path, content)
+        self.recovery_state.record_file_read(str(file_path), content)
 
     async def _extract_memories(
         self, conversation: ConversationManager
@@ -1075,6 +1079,7 @@ class Agent:
         system = build_system_prompt(
             hook_prompts=hook_prompts,
             coordinator_mode=self.coordinator_mode,
+            work_dir=self.work_dir,
         )
 
         tools = self.registry.get_all_schemas(self.protocol)

@@ -499,4 +499,14 @@ def test_environment_context():
     ctx = build_environment_context("/home/user/project")
     assert "/home/user/project" in ctx
     assert "Operating system" in ctx
+    assert "Command shell" in ctx
     assert "Current time" in ctx
+
+def test_detect_environment_windows_shell(monkeypatch):
+    from mewcode import prompts
+
+    monkeypatch.setattr(prompts.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    env = prompts.detect_environment(".")
+
+    assert env.shell.endswith("cmd.exe")

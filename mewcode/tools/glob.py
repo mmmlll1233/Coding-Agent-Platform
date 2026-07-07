@@ -23,10 +23,16 @@ class Glob(Tool):
     params_model = Params
     category = "read"
     is_concurrency_safe = True
+    work_dir: str | None = None
 
+    def _resolve_path(self, path: str) -> Path:
+        base = Path(path)
+        if not base.is_absolute() and self.work_dir:
+            base = Path(self.work_dir) / base
+        return base
 
     async def execute(self, params: Params) -> ToolResult:
-        base = Path(params.path)
+        base = self._resolve_path(params.path)
         if not base.exists():
             return ToolResult(output=f"Error: path not found: {params.path}", is_error=True)
 
@@ -44,4 +50,3 @@ class Glob(Tool):
         if not matches:
             return ToolResult(output="No files matched the pattern.")
         return ToolResult(output="\n".join(matches))
-

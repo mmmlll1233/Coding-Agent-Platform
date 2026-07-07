@@ -723,6 +723,221 @@ class TestAgentToolParams:
         assert params.name == "my-agent"
         assert params.isolation == "worktree"
 
+
+class TestAgentToolIsolation:
+    @pytest.mark.asyncio
+    async def test_execute_honors_worktree_isolation_param(self):
+        from mewcode.tools.agent_tool import AgentTool, AgentToolParams
+
+        loader = MagicMock()
+        loader.get.return_value = AgentDef(
+            agent_type="general-purpose",
+            when_to_use="test",
+            permission_mode="default",
+        )
+        tool = AgentTool(
+            agent_loader=loader,
+            task_manager=MagicMock(),
+            trace_manager=MagicMock(),
+            parent_agent=MagicMock(),
+        )
+        tool._execute_with_worktree = AsyncMock(return_value=ToolResult(output="ok"))
+
+        result = await tool.execute(AgentToolParams(
+            prompt="do it",
+            description="test",
+            subagent_type="general-purpose",
+            isolation="worktree",
+        ))
+
+        assert result.output == "ok"
+        tool._execute_with_worktree.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_unknown_isolation_param(self):
+        from mewcode.tools.agent_tool import AgentTool, AgentToolParams
+
+        tool = AgentTool(
+            agent_loader=MagicMock(),
+            task_manager=MagicMock(),
+            trace_manager=MagicMock(),
+            parent_agent=MagicMock(),
+        )
+
+        result = await tool.execute(AgentToolParams(
+            prompt="do it",
+            description="test",
+            subagent_type="general-purpose",
+            isolation="container",
+        ))
+
+        assert result.is_error is True
+        assert "Invalid isolation mode" in result.output
+
+    @pytest.mark.asyncio
+    async def test_worktree_isolation_defaults_to_bypass_permissions(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from mewcode.permissions import PermissionMode
+        from mewcode.tools.agent_tool import AgentTool, AgentToolParams
+
+        created_agents = []
+        tasks = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                self.permission_mode = kwargs["permission_checker"].mode
+                self.permission_checker = kwargs["permission_checker"]
+                self.registry = kwargs["registry"]
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.agent_id = ""
+                self.parent_id = None
+                self.trace_id = None
+                created_agents.append(self)
+
+            async def run_to_completion(self, task):
+                tasks.append(task)
+                return "done"
+
+        monkeypatch.setattr("mewcode.agent.Agent", FakeAgent)
+
+        loader = MagicMock()
+        loader.get.return_value = AgentDef(
+            agent_type="general-purpose",
+            when_to_use="test",
+            permission_mode="default",
+        )
+        parent_agent = MagicMock()
+        from mewcode.tools import create_default_registry
+
+        parent_agent.work_dir = r"D:\repo\main"
+        parent_agent.registry = create_default_registry()
+        parent_agent._full_registry = None
+        parent_agent.protocol = "anthropic"
+        parent_agent.max_iterations = 10
+        parent_agent.context_window = 200_000
+        parent_agent.hook_engine = None
+        parent_agent.client = MagicMock()
+        parent_agent.agent_id = "parent"
+        parent_agent.trace_id = "trace"
+
+        trace_manager = MagicMock()
+        trace_manager.create.return_value = SimpleNamespace(agent_id="child")
+        worktree_manager = MagicMock()
+        wt_path = r"D:\repo\main\.mewcode\worktrees\agent-test"
+        worktree_manager.create = AsyncMock(return_value=SimpleNamespace(
+            path=wt_path,
+            head_commit="abc123",
+        ))
+        worktree_manager.auto_cleanup = AsyncMock(return_value=SimpleNamespace(
+            kept=False,
+            path=".",
+            branch="worktree-test",
+        ))
+
+        tool = AgentTool(
+            agent_loader=loader,
+            task_manager=MagicMock(),
+            trace_manager=trace_manager,
+            parent_agent=parent_agent,
+            worktree_manager=worktree_manager,
+        )
+
+        result = await tool.execute(AgentToolParams(
+            prompt=r"Current working directory: D:\repo\main. Read D:\repo\main\me.txt and commit it.",
+            description="test",
+            subagent_type="general-purpose",
+            isolation="worktree",
+        ))
+
+        assert result.output == "done"
+        assert created_agents[0].permission_mode == PermissionMode.BYPASS
+        assert created_agents[0].registry.get("EditFile").work_dir == wt_path
+        assert created_agents[0].registry.get("Bash").work_dir == wt_path
+        assert created_agents[0].registry.get("ReadFile").work_dir == wt_path
+        assert created_agents[0].permission_checker.enforce_path_sandbox is True
+        assert created_agents[0].permission_checker.forbidden_paths == [r"D:\repo\main"]
+        assert fr"Current working directory: {wt_path}" in tasks[0]
+        assert fr"{wt_path}\me.txt" in tasks[0]
+
+    @pytest.mark.asyncio
+    async def test_edit_file_relative_path_uses_bound_work_dir(self, tmp_path: Path):
+        from mewcode.tools.edit_file import EditFile, Params
+
+        main = tmp_path / "main"
+        wt = tmp_path / "wt"
+        main.mkdir()
+        wt.mkdir()
+        (main / "me.txt").write_text("main\n", encoding="utf-8")
+        (wt / "me.txt").write_text("worker\n", encoding="utf-8")
+
+        tool = EditFile()
+        tool.work_dir = str(wt)
+        result = await tool.execute(Params(
+            file_path="me.txt",
+            old_string="worker",
+            new_string="modified by isolated worker",
+        ))
+
+        assert result.is_error is False
+        assert (main / "me.txt").read_text(encoding="utf-8") == "main\n"
+        assert (wt / "me.txt").read_text(encoding="utf-8") == "modified by isolated worker\n"
+
+    def test_enforced_path_sandbox_denies_outside_path_even_in_bypass(self, tmp_path: Path):
+        from mewcode.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+        from mewcode.tools.edit_file import EditFile
+
+        main = tmp_path / "main"
+        wt = tmp_path / "wt"
+        main.mkdir()
+        wt.mkdir()
+        outside = main / "me.txt"
+        outside.write_text("main\n", encoding="utf-8")
+
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(str(wt)),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.BYPASS,
+            enforce_path_sandbox=True,
+        )
+
+        decision = checker.check(EditFile(), {"file_path": str(outside)})
+
+        assert decision.effect == "deny"
+
+    def test_worktree_checker_denies_bash_command_with_parent_path(self):
+        from mewcode.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+        from mewcode.tools.bash import Bash
+
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(r"D:\repo\main\.mewcode\worktrees\agent-test"),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.BYPASS,
+            enforce_path_sandbox=True,
+            forbidden_paths=[r"D:\repo\main"],
+        )
+
+        decision = checker.check(Bash(), {
+            "command": r'git -C D:\repo\main add me.txt',
+        })
+
+        assert decision.effect == "deny"
+
 # =====================================================================
 # 11. Agent（run_to_completion 基础功能、agent_id、trace_id）
 # =====================================================================

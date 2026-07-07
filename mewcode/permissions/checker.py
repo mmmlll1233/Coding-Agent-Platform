@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from mewcode.permissions.dangerous import DangerousCommandDetector, is_safe_command
@@ -33,6 +34,8 @@ class PermissionChecker:
         rule_engine: RuleEngine,
         mode: PermissionMode = PermissionMode.DEFAULT,
         sandbox_enabled: bool = False,
+        enforce_path_sandbox: bool = False,
+        forbidden_paths: list[str] | None = None,
     ) -> None:
         self.detector = detector
         self.sandbox = sandbox
@@ -41,6 +44,8 @@ class PermissionChecker:
         self.plan_file_path: str = ""
         # OS 级沙箱是否启用（开启后命令类工具可自动放行，因为内核会兜底）
         self.sandbox_enabled = sandbox_enabled
+        self.enforce_path_sandbox = enforce_path_sandbox
+        self.forbidden_paths = forbidden_paths or []
         # Layer 4b: 会话级 allow-always 集合（内存中，不持久化）
         # 存放格式为 "ToolName:pattern"，用户选择 "don't ask again" 时记录
         self._session_allowed: set[str] = set()
@@ -86,6 +91,9 @@ class PermissionChecker:
     def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
         content = extract_content(tool.name, arguments)
 
+        if content and self._contains_forbidden_path(content):
+            return Decision(effect="deny", reason="命令或路径包含隔离环境外的父工作区路径")
+
         # Layer 0: Plan 模式例外放行
         if self.mode == PermissionMode.PLAN:
             if tool.name in _PLAN_MODE_ALLOWED_TOOLS:
@@ -128,6 +136,8 @@ class PermissionChecker:
         # Layer 2: 路径沙箱（仅文件类工具）
         if tool.category in ("read", "write") and content:
             ok, reason = self.sandbox.check(content)
+            if not ok and self.enforce_path_sandbox:
+                return Decision(effect="deny", reason=f"路径沙箱拦截: {reason}")
             if not ok and self.mode != PermissionMode.BYPASS:
                 return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}")
 
@@ -166,3 +176,17 @@ class PermissionChecker:
         if os.path.basename(target_path) == os.path.basename(self.plan_file_path):
             return True
         return ".mewcode/plans/" in target_path
+
+    def _contains_forbidden_path(self, content: str) -> bool:
+        if not self.forbidden_paths:
+            return False
+
+        def normalize(value: str) -> str:
+            return os.path.normcase(str(Path(value))).replace("/", "\\")
+
+        normalized_content = os.path.normcase(content).replace("/", "\\")
+        for path in self.forbidden_paths:
+            normalized_path = normalize(path)
+            if normalized_path and normalized_path in normalized_content:
+                return True
+        return False

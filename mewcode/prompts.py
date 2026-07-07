@@ -168,7 +168,10 @@ In code: default to writing no comments. Never write multi-paragraph docstrings 
 
 def detect_environment(work_dir: str) -> EnvironmentContext:
     """检测当前运行环境，返回 EnvironmentContext（对齐 Go 版 DetectEnvironment）。"""
-    shell = os.environ.get("SHELL", "bash")
+    if platform.system() == "Windows":
+        shell = os.environ.get("COMSPEC", "cmd.exe")
+    else:
+        shell = os.environ.get("SHELL", "/bin/sh")
     is_git = False
     branch = ""
     try:
@@ -374,7 +377,9 @@ def build_environment_context(
     parts = [
         f"Current working directory: {work_dir}",
         f"Operating system: {platform.system()} {platform.release()}",
+        f"Command shell: {detect_environment(work_dir).shell}",
         f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "Use ReadFile/Glob/Grep for file inspection; do not use Unix-only shell commands like cat to decide whether a file exists.",
     ]
 
     if agent_catalog:
