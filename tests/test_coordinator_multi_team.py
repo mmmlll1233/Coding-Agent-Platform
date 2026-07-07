@@ -1,8 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-
 # 回归测试：Coordinator Mode 在多 Team 场景下的工具限制/恢复行为，
 # 覆盖 team_create.py / team_delete.py 里曾经出现过的两个 bug：
 # 1. 存在多个 Team 时，删除其中一个不应该提前恢复全部工具；

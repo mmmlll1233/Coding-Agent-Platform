@@ -1,4 +1,4 @@
-# MewCode 项目1
+# MewCode 项目
 
 ## 技术栈
 - Python
