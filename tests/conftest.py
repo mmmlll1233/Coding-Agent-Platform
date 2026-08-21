@@ -6,12 +6,7 @@ from pathlib import Path
 import pytest
 
 
-EXPECTED_PHASE1_XFAILS = {
-    "tests/platform/test_phase1_known_gaps.py::test_parallel_tool_batch_uses_the_same_policy_gate",
-    "tests/platform/test_phase1_known_gaps.py::test_bash_nonzero_exit_is_a_structured_error",
-    "tests/platform/test_phase1_known_gaps.py::test_bash_timeout_kills_descendant_processes",
-    "tests/platform/test_phase1_known_gaps.py::test_run_to_completion_has_symmetric_session_lifecycle",
-}
+EXPECTED_PLATFORM_XFAILS: set[str] = set()
 ALLOWED_CAPABILITY_SKIPS = {
     "tests/test_permissions.py::TestPathSandbox::test_symlink_escape",
 }
@@ -23,10 +18,16 @@ _outcome_errors: list[str] = []
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
+        "--enforce-platform-outcomes",
+        action="store_true",
+        default=False,
+        help="Reject unregistered skips and xfails in platform safety tests.",
+    )
+    parser.addoption(
         "--enforce-phase0-outcomes",
         action="store_true",
         default=False,
-        help="Reject unregistered skips/xfails and require the four Phase 1 gaps.",
+        help="Deprecated alias for --enforce-platform-outcomes.",
     )
 
 
@@ -49,16 +50,19 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    if not session.config.getoption("--enforce-phase0-outcomes"):
+    if not (
+        session.config.getoption("--enforce-platform-outcomes")
+        or session.config.getoption("--enforce-phase0-outcomes")
+    ):
         return
 
-    unexpected_xfails = set(_observed_xfails) - EXPECTED_PHASE1_XFAILS
-    missing_xfails = EXPECTED_PHASE1_XFAILS - set(_observed_xfails)
+    unexpected_xfails = set(_observed_xfails) - EXPECTED_PLATFORM_XFAILS
+    missing_xfails = EXPECTED_PLATFORM_XFAILS - set(_observed_xfails)
     unexpected_skips = set(_observed_skips) - ALLOWED_CAPABILITY_SKIPS
     invalid_xfail_reasons = {
         nodeid
         for nodeid, reason in _observed_xfails.items()
-        if not reason.startswith("PHASE1-")
+        if not reason.startswith("PLATFORM-")
     }
     invalid_skip_reasons = {
         nodeid
@@ -68,7 +72,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     checks = (
         (unexpected_xfails, "unexpected xfail"),
-        (missing_xfails, "missing Phase 1 xfail"),
+        (missing_xfails, "missing platform xfail"),
         (unexpected_skips, "unexpected skip"),
         (invalid_xfail_reasons, "xfail without PHASE1 reason"),
         (invalid_skip_reasons, "skip without PHASE0 capability reason"),
@@ -84,7 +88,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     if not _outcome_errors:
         return
-    terminalreporter.write_sep("=", "Phase 0 outcome gate failures")
+    terminalreporter.write_sep("=", "Platform outcome gate failures")
     for error in _outcome_errors:
         terminalreporter.write_line(error)
 

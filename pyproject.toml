@@ -33,7 +33,7 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "security_contract: validates Phase 0 threat fixtures and safety contracts without executing attacks",
-    "phase1_gap: executable characterization of a known Agent Runtime defect assigned to Phase 1",
+    "runtime_contract: validates the unified Agent Runtime and command execution contracts",
     "executor_security: requires the Phase 2 isolated Docker ExecutionEnvironment",
     "resource_exhaustion: runs bounded resource pressure only inside an isolated executor",
 ]

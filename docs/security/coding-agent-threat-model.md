@@ -82,3 +82,20 @@ python -m pytest -q --strict-markers --enforce-phase0-outcomes \
 ```
 
 唯一 skip 是 Windows 缺少 symlink 创建能力时的 `PHASE0-CAPABILITY-SYMLINK`；四个严格 xfail 分别对应 Phase 1 的统一 policy gate、Bash 非零退出码、进程树取消和生命周期对称性。Linux/Windows 与 Python 3.11/3.13 的其余组合由 GitHub Actions 测试矩阵持续验证。
+
+## 9. Phase 1 验收记录
+
+2026-08-21 在 Windows、Python 3.13 上执行升级后的平台门禁：
+
+```text
+python -m pytest -q --strict-markers --enforce-platform-outcomes \
+  -m "not executor_security and not resource_exhaustion"
+
+600 passed, 1 skipped
+```
+
+四个 Phase 1 `xfail` 已全部升级为普通测试。统一 policy gate、结构化 Bash
+结果、Windows Job Object/POSIX process group 取消、对称 lifecycle、Runtime
+profile 隔离以及 JobRunner 四类结果均已有自动化覆盖。唯一 skip 仍是 Windows
+缺少 symlink 创建能力时的 `PHASE0-CAPABILITY-SYMLINK`；Docker、资源耗尽和
+真实隔离断言继续由 Phase 2 负责。

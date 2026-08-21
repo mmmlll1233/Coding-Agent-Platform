@@ -13,10 +13,26 @@ MAX_OUTPUT_CHARS = 10000
 ToolCategory = Literal["read", "write", "command"]
 
 
+@dataclass(frozen=True)
+class CommandExecutionResult:
+    """Machine-readable outcome for command-backed tools.
+
+    ``exit_code`` is ``None`` only when the command could not be started.  A
+    timed-out command is reaped before this object is created, so its observed
+    return code is retained when the operating system provides one.
+    """
+
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
 @dataclass
 class ToolResult:
     output: str
     is_error: bool = False
+    command_result: CommandExecutionResult | None = None
 
 
 class Tool(ABC):

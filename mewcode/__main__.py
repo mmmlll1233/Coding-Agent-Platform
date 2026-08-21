@@ -120,27 +120,22 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         TurnComplete,
         UsageEvent,
     )
-    from mewcode.client import create_client, resolve_context_window
     from mewcode.conversation import ConversationManager
-    from mewcode.memory.instructions import load_instructions
-    from mewcode.permissions import (
-        DangerousCommandDetector,
-        PathSandbox,
-        PermissionChecker,
-        RuleEngine,
-    )
-    from mewcode.tools import create_default_registry
     from mewcode.agents.loader import AgentLoader
     from mewcode.agents.task_manager import TaskManager
     from mewcode.agents.trace import TraceManager
     from mewcode.tools.agent_tool import AgentTool
-    from mewcode.tools.impl.tool_search import ToolSearchTool
     from mewcode.teams.manager import TeamManager
     from mewcode.teams.models import BackendType
     from mewcode.tools.team_create import TeamCreateTool
     from mewcode.tools.team_delete import TeamDeleteTool
     from mewcode.worktree import WorktreeManager
     from mewcode.config import WorktreeConfig
+    from mewcode.platform.runtime import (
+        AgentRuntimeFactory,
+        RuntimeOptions,
+        RuntimeProfile,
+    )
 
     is_json = output_format == "stream-json"
 
@@ -149,38 +144,24 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         print(json.dumps(obj, ensure_ascii=False), flush=True)
 
     provider = config.providers[0]
-    client = create_client(provider)
-    # 第 2 层：尽力从 provider 自动拉取模型的 context window（缓存在 provider 上）。
-    # 不会抛异常或阻塞启动；失败则退化到映射表。
-    await resolve_context_window(provider)
     work_dir = os.getcwd()
-    home = Path.home()
-
-    checker = PermissionChecker(
-        detector=DangerousCommandDetector(),
-        sandbox=PathSandbox(work_dir),
-        rule_engine=RuleEngine(
-            user_rules_path=home / ".mewcode" / "permissions.yaml",
-            project_rules_path=Path(work_dir) / ".mewcode" / "permissions.yaml",
-            local_rules_path=Path(work_dir) / ".mewcode" / "permissions.local.yaml",
-        ),
-        mode=permission_mode,
+    runtime = AgentRuntimeFactory.create(
+        RuntimeOptions(
+            profile=RuntimeProfile.PROMPT,
+            provider=provider,
+            workspace=work_dir,
+            permission_mode=permission_mode,
+            hook_engine=hook_engine,
+            worktree_config=config.worktree,
+            enable_fork=config.enable_fork,
+            enable_verification_agent=config.enable_verification_agent,
+            teammate_mode="in-process",
+            enable_coordinator_mode=config.enable_coordinator_mode,
+        )
     )
-
-    instructions = load_instructions(work_dir)
-    registry = create_default_registry()
-    registry.register(ToolSearchTool(registry, protocol=provider.protocol))
-
-    agent = Agent(
-        client=client,
-        registry=registry,
-        protocol=provider.protocol,
-        work_dir=work_dir,
-        permission_checker=checker,
-        context_window=provider.get_context_window(),
-        instructions_content=instructions,
-        hook_engine=hook_engine,
-    )
+    await runtime.start()
+    agent = runtime.agent
+    registry = runtime.registry
 
     wt_cfg = config.worktree or WorktreeConfig()
     wt_manager = WorktreeManager(
@@ -192,6 +173,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
     agent_loader.load_all()
     team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager)
+    runtime.bind_service("worktree_manager", wt_manager)
+    runtime.bind_service("trace_manager", trace_manager)
+    runtime.bind_service("task_manager", task_manager)
+    runtime.bind_service("agent_loader", agent_loader)
+    runtime.bind_service("team_manager", team_manager)
 
     agent_tool = AgentTool(
         agent_loader=agent_loader,
@@ -230,7 +216,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     agent.notification_fn = drain_mailbox_only
 
     # 使用事件驱动的 agent.run()，支持 text 和 stream-json 两种输出格式
-    conv = ConversationManager()
+    conv = runtime.conversation
     conv.add_user_message(prompt)
 
     start = time.monotonic()
@@ -264,14 +250,22 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
             if tool_calls:
                 tool_calls[-1]["is_error"] = event.is_error
             if is_json:
-                emit_json({
+                payload = {
                     "type": "tool_result",
                     "tool_name": event.tool_name,
                     "tool_id": event.tool_id,
                     "output": event.output,
                     "is_error": event.is_error,
                     "elapsed": round(event.elapsed, 3),
-                })
+                }
+                if event.command_result is not None:
+                    payload["command_result"] = {
+                        "exit_code": event.command_result.exit_code,
+                        "stdout": event.command_result.stdout,
+                        "stderr": event.command_result.stderr,
+                        "timed_out": event.command_result.timed_out,
+                    }
+                emit_json(payload)
 
         elif isinstance(event, UsageEvent):
             total_input = event.input_tokens

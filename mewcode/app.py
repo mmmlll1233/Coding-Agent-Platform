@@ -596,6 +596,7 @@ class MewCodeApp(App):
         self.conversation = ConversationManager()
         self.registry: ToolRegistry = create_default_registry(file_cache=self.file_cache)
         self.agent: Agent | None = None
+        self.runtime: Any | None = None
         self.mcp_manager: MCPManager | None = None
         self._mcp_init_task: asyncio.Task[None] | None = None
         self._selected_provider: ProviderConfig | None = None
@@ -679,91 +680,59 @@ class MewCodeApp(App):
 
     def _select_provider(self, provider: ProviderConfig) -> None:
         self._selected_provider = provider
+        work_dir = os.getcwd()
         try:
-            self.client = create_client(provider)
+            from mewcode.platform.runtime import (
+                AgentRuntimeFactory,
+                RuntimeOptions,
+                RuntimeProfile,
+            )
+
+            self.runtime = AgentRuntimeFactory.create(
+                RuntimeOptions(
+                    profile=RuntimeProfile.TUI,
+                    provider=provider,
+                    workspace=work_dir,
+                    permission_mode=self._initial_permission_mode,
+                    hook_engine=self.hook_engine,
+                    sandbox_config=self._sandbox_cfg,
+                    registry=self.registry,
+                    file_cache=self.file_cache,
+                    mcp_servers=tuple(self._mcp_server_configs),
+                    worktree_config=self._worktree_config,
+                    enable_fork=self._enable_fork,
+                    enable_verification_agent=self._enable_verification_agent,
+                    teammate_mode=self._teammate_mode,
+                    enable_coordinator_mode=self._enable_coordinator_mode,
+                )
+            )
         except AuthenticationError as e:
             self._show_error(str(e))
             return
+        except ValueError as e:
+            self._show_error(str(e))
+            return
 
-        work_dir = os.getcwd()
-        home = Path.home()
-
-        # 根据配置决定是否启用 OS 级沙箱自动放行
-        sandbox_auto_allow = (
-            self._sandbox_cfg.enabled and self._sandbox_cfg.auto_allow
-        )
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(work_dir),
-            rule_engine=RuleEngine(
-                user_rules_path=home / ".mewcode" / "permissions.yaml",
-                project_rules_path=Path(work_dir) / ".mewcode" / "permissions.yaml",
-                local_rules_path=Path(work_dir) / ".mewcode" / "permissions.local.yaml",
-            ),
-            mode=self._initial_permission_mode,
-            sandbox_enabled=sandbox_auto_allow,
-        )
-
-        # 如果配置启用了沙箱，为 Bash 工具挂载 OS 沙箱
-        if self._sandbox_cfg.enabled:
-            from mewcode.sandbox import SandboxConfig, create_sandbox
-            os_sandbox = create_sandbox()
-            if os_sandbox and os_sandbox.available():
-                sandbox_config = SandboxConfig(
-                    allow_write=[work_dir, "/tmp"],
-                    deny_write=[
-                        f"{work_dir}/.mewcode/config.yaml",
-                        f"{work_dir}/.mewcode/permissions.local.yaml",
-                    ],
-                    network_enabled=self._sandbox_cfg.network_enabled,
-                )
-                bash_tool = self.registry.get("Bash")
-                if bash_tool:
-                    bash_tool.sandbox = os_sandbox
-                    bash_tool.sandbox_config = sandbox_config
-
-        self._instructions_content = load_instructions(work_dir)
-        self.memory_manager = MemoryManager(work_dir)
-        self.session_manager = SessionManager(work_dir)
-        self.session_manager.cleanup()
-        self.session = self.session_manager.create()
-
-        from mewcode.filehistory import FileHistory
-        self.file_history = FileHistory(work_dir, self.session.session_id)
-        for tool in self.registry.list_tools():
-            if hasattr(tool, "file_history"):
-                tool.file_history = self.file_history
-
-        load_skill_tool = LoadSkill()
-        self.registry.register(load_skill_tool)
-        self._load_skill_tool = load_skill_tool
+        self.client = self.runtime.client
+        self.agent = self.runtime.agent
+        self.conversation = self.runtime.conversation
+        self.memory_manager = self.runtime.memory_manager
+        self.session_manager = self.runtime.session_manager
+        self.session = self.runtime.session
+        self.file_history = self.runtime.services.get("file_history")
+        self._instructions_content = self.agent.instructions_content
+        self.skill_loader = self.runtime.skill_loader
+        self._load_skill_tool = self.runtime.load_skill_tool
 
         install_skill_tool = InstallSkillTool()
         self.registry.register(install_skill_tool)
         self._install_skill_tool = install_skill_tool
 
-        self.registry.register(
-            ToolSearchTool(self.registry, protocol=provider.protocol)
-        )
         self.registry.register(AskUserTool())
 
         from mewcode.tools.exit_plan_mode import ExitPlanModeTool
         self._exit_plan_tool = ExitPlanModeTool()
         self.registry.register(self._exit_plan_tool)
-
-        self.agent = Agent(
-            client=self.client,
-            registry=self.registry,
-            protocol=provider.protocol,
-            work_dir=work_dir,
-            permission_checker=checker,
-            context_window=provider.get_context_window(),
-            instructions_content=self._instructions_content,
-            memory_manager=self.memory_manager,
-            hook_engine=self.hook_engine,
-        )
-        self.agent.file_history = self.file_history
-        self.agent.session_id = self.session.session_id
 
         self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
         self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()
@@ -771,16 +740,6 @@ class MewCodeApp(App):
         # Layer 2: 在后台异步拉取模型的 context window，不阻塞启动流程。
         # agent 已经有一个同步解析的窗口值（来自配置 / 映射表 / 默认值）；
         # 如果异步拉取成功，就原地升级为更准确的值。
-        self.run_worker(
-            self._resolve_context_window(provider), exclusive=False
-        )
-
-        self.skill_loader = SkillLoader(work_dir)
-        self.skill_loader.load_all()
-
-        load_skill_tool.set_loader(self.skill_loader)
-        load_skill_tool.set_agent(self.agent)
-
         install_skill_tool.set_loader(self.skill_loader)
 
         self.skill_executor = SkillExecutor(
@@ -789,7 +748,7 @@ class MewCodeApp(App):
             protocol=provider.protocol,
         )
 
-        catalog = self.skill_loader.get_catalog()
+        catalog = self.skill_loader.get_catalog() if self.skill_loader else []
         if catalog:
             lines = [
                 "You can use the following Skills:",
@@ -854,6 +813,11 @@ class MewCodeApp(App):
         from mewcode.tools.team_delete import TeamDeleteTool
 
         self.team_manager = TeamManager(worktree_manager=self.worktree_manager, trace_manager=self.trace_manager)
+        self.runtime.bind_service("worktree_manager", self.worktree_manager)
+        self.runtime.bind_service("trace_manager", self.trace_manager)
+        self.runtime.bind_service("task_manager", self.task_manager)
+        self.runtime.bind_service("agent_loader", self.agent_loader)
+        self.runtime.bind_service("team_manager", self.team_manager)
 
         agent_tool = AgentTool(
             agent_loader=self.agent_loader,
@@ -928,8 +892,7 @@ class MewCodeApp(App):
                 )
             )
 
-        if self._mcp_server_configs:
-            self._mcp_init_task = asyncio.create_task(self._init_mcp())
+        self._mcp_init_task = asyncio.create_task(self.runtime.start())
 
         self.query_one("#model-label", Static).update(provider.model)
         work_dir = os.getcwd()
@@ -1895,6 +1858,8 @@ class MewCodeApp(App):
         if self.mcp_manager is not None:
             await self.mcp_manager.shutdown()
             self.mcp_manager = None
+        if self.runtime is not None:
+            await self.runtime.aclose()
 
     # -----------------------------------------------------------------
     # 退出

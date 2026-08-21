@@ -83,11 +83,13 @@ class RemoteServer:
 
         # Agent 相关状态
         self.agent: Agent | None = None
+        self.runtime: Any | None = None
         self.conversation: ConversationManager | None = None
         self.registry: ToolRegistry | None = None
         self.session_id: str = ""
         self._streaming = False
         self._cancel_event: asyncio.Event | None = None
+        self._agent_task: asyncio.Task[Any] | None = None
 
         # 权限请求的 pending 队列：id -> Future
         self._pending_perms: dict[str, asyncio.Future[PermissionResponse]] = {}
@@ -114,24 +116,26 @@ class RemoteServer:
 
     async def run(self) -> None:
         """启动 HTTP + WebSocket 服务器。"""
-        # 初始化 Agent
-        self._init_agent()
+        try:
+            self._init_agent()
+            if self.runtime is not None:
+                await self.runtime.start()
 
-        # 初始化 MCP（如果有配置）
-        await self._init_mcp()
-
-        print(f"\n  Remote UI: http://localhost:{self.port}\n")
-
-        # websockets 的 serve 支持 process_request 回调来处理普通 HTTP
-        async with websockets.serve(
-            self._ws_handler,
-            self.addr,
-            self.port,
-            process_request=self._process_http_request,
-            max_size=4 * 1024 * 1024,  # 4MB 消息上限
-        ):
-            # 服务器启动后永久阻塞
-            await asyncio.Future()
+            print(f"\n  Remote UI: http://localhost:{self.port}\n")
+            async with websockets.serve(
+                self._ws_handler,
+                self.addr,
+                self.port,
+                process_request=self._process_http_request,
+                max_size=4 * 1024 * 1024,
+            ):
+                await asyncio.Future()
+        finally:
+            if self.mcp_manager is not None:
+                await self.mcp_manager.shutdown()
+                self.mcp_manager = None
+            if self.runtime is not None:
+                await self.runtime.aclose()
 
     # ------------------------------------------------------------------
     # HTTP 请求处理（为 / 路径提供前端 HTML）
@@ -200,6 +204,8 @@ class RemoteServer:
                 elif msg_type == "cancel":
                     if self._cancel_event is not None:
                         self._cancel_event.set()
+                    if self._agent_task is not None and not self._agent_task.done():
+                        self._agent_task.cancel()
 
                 elif msg_type == "ping":
                     # 应用层保活
@@ -216,71 +222,32 @@ class RemoteServer:
 
     def _init_agent(self) -> None:
         """初始化 Agent 及相关子系统。"""
+        from mewcode.platform.runtime import (
+            AgentRuntimeFactory,
+            RuntimeOptions,
+            RuntimeProfile,
+        )
+
         provider = self.providers[0]
         work_dir = os.getcwd()
-        home = Path.home()
-
-        # 权限系统
-        checker = PermissionChecker(
-            detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(work_dir),
-            rule_engine=RuleEngine(
-                user_rules_path=home / ".mewcode" / "permissions.yaml",
-                project_rules_path=Path(work_dir) / ".mewcode" / "permissions.yaml",
-                local_rules_path=Path(work_dir) / ".mewcode" / "permissions.local.yaml",
-            ),
-            mode=PermissionMode.DEFAULT,
+        self.runtime = AgentRuntimeFactory.create(
+            RuntimeOptions(
+                profile=RuntimeProfile.REMOTE,
+                provider=provider,
+                workspace=work_dir,
+                permission_mode=PermissionMode.DEFAULT,
+                hook_engine=self.hook_engine,
+                mcp_servers=tuple(self._mcp_server_configs),
+            )
         )
-
-        # 加载自定义指令和记忆
-        instructions = load_instructions(work_dir)
-        self.memory_manager = MemoryManager(work_dir)
-        self.session_manager = SessionManager(work_dir)
-        self.session = self.session_manager.create()
-        self.session_id = self.session.session_id
-
-        # 创建 LLM 客户端
-        client = create_client(provider)
-
-        # 工具注册表
-        self.registry = create_default_registry()
-        self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
-
-        # Skill 加载
-        self.skill_loader = SkillLoader(work_dir)
-        self.skill_loader.load_all()
-        load_skill_tool = LoadSkill()
-        self.registry.register(load_skill_tool)
-
-        # 创建 Agent
-        self.agent = Agent(
-            client=client,
-            registry=self.registry,
-            protocol=provider.protocol,
-            work_dir=work_dir,
-            permission_checker=checker,
-            context_window=provider.get_context_window(),
-            instructions_content=instructions,
-            memory_manager=self.memory_manager,
-            hook_engine=self.hook_engine,
-        )
-        self.agent.session_id = self.session_id
-
-        # 连接 Skill 到 Agent
-        load_skill_tool.set_loader(self.skill_loader)
-        load_skill_tool.set_agent(self.agent)
-
-        catalog = self.skill_loader.get_catalog()
-        if catalog:
-            lines = ["You can use the following Skills:", ""]
-            for name, desc in catalog:
-                lines.append(f"- {name}: {desc}")
-            lines.append("")
-            lines.append("If the user's request matches a Skill, call LoadSkill to activate it.")
-            self.agent.set_skill_catalog("\n".join(lines))
-
-        # 初始化对话管理器
-        self.conversation = ConversationManager()
+        self.agent = self.runtime.agent
+        self.registry = self.runtime.registry
+        self.conversation = self.runtime.conversation
+        self.memory_manager = self.runtime.memory_manager
+        self.session_manager = self.runtime.session_manager
+        self.session = self.runtime.session
+        self.session_id = self.session.session_id if self.session else ""
+        self.skill_loader = self.runtime.skill_loader
 
         log.info("Agent initialized: session=%s, model=%s", self.session_id, provider.model)
 
@@ -351,6 +318,7 @@ class RemoteServer:
 
         # 创建取消事件
         self._cancel_event = asyncio.Event()
+        self._agent_task = asyncio.current_task()
         start_time = time.monotonic()
         stream_buf = ""
 
@@ -391,15 +359,23 @@ class RemoteServer:
                             "data": {"text": stream_buf},
                         })
                         stream_buf = ""
+                    result_data = {
+                        "toolId": event.tool_id,
+                        "toolName": event.tool_name,
+                        "output": event.output,
+                        "isError": event.is_error,
+                        "elapsed": event.elapsed,
+                    }
+                    if event.command_result is not None:
+                        result_data["commandResult"] = {
+                            "exitCode": event.command_result.exit_code,
+                            "stdout": event.command_result.stdout,
+                            "stderr": event.command_result.stderr,
+                            "timedOut": event.command_result.timed_out,
+                        }
                     await self._broadcast({
                         "type": "tool_result",
-                        "data": {
-                            "toolId": event.tool_id,
-                            "toolName": event.tool_name,
-                            "output": event.output,
-                            "isError": event.is_error,
-                            "elapsed": event.elapsed,
-                        },
+                        "data": result_data,
                     })
 
                 elif isinstance(event, PermissionRequest):
@@ -496,6 +472,7 @@ class RemoteServer:
         finally:
             self._streaming = False
             self._cancel_event = None
+            self._agent_task = None
 
     # ------------------------------------------------------------------
     # 斜杠命令处理

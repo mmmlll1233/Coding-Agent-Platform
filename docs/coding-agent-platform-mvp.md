@@ -296,6 +296,10 @@ mewcode/platform/
 - 引入 `AgentRuntimeFactory`、`JobRunner`、`JobResult`、`JobEventSink`。
 - 修复权限绕过、非零 exit code、取消和 hook 生命周期不对称问题。
 
+交付状态（2026-08-21）：已完成。CLI `-p`、TUI 和 Remote 已迁移到统一
+RuntimeFactory；四个 Phase 1 严格 `xfail` 已升级为普通契约测试。接口和行为说明
+见 `docs/platform/phase1-agent-runtime.md`。
+
 验收：CLI/TUI测试通过；同一个内核可在测试中产生结构化成功、失败和取消结果。
 
 ### Phase 2：Docker ExecutionEnvironment（5～7 天）

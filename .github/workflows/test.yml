@@ -40,7 +40,7 @@ jobs:
 
       - name: Run default test gate
         run: >-
-          uv run pytest -q --strict-markers --enforce-phase0-outcomes
+          uv run pytest -q --strict-markers --enforce-platform-outcomes
           -m "not executor_security and not resource_exhaustion"
 
       - name: Verify tests left the checkout clean

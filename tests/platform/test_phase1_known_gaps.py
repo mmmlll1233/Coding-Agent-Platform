@@ -58,11 +58,7 @@ class AlwaysDeny:
         return Decision(effect="deny", reason="Phase 1 policy-gate test")
 
 
-@pytest.mark.phase1_gap
-@pytest.mark.xfail(
-    strict=True,
-    reason="PHASE1-POLICY-GATE: concurrent-safe batches bypass permission and hook gates",
-)
+@pytest.mark.runtime_contract
 @pytest.mark.asyncio
 async def test_parallel_tool_batch_uses_the_same_policy_gate(tmp_path: Path) -> None:
     executed: list[int] = []
@@ -98,11 +94,7 @@ async def test_parallel_tool_batch_uses_the_same_policy_gate(tmp_path: Path) -> 
     assert all(result.is_error for result in results)
 
 
-@pytest.mark.phase1_gap
-@pytest.mark.xfail(
-    strict=True,
-    reason="PHASE1-BASH-RESULT: non-zero exit codes are not represented as tool errors",
-)
+@pytest.mark.runtime_contract
 @pytest.mark.asyncio
 async def test_bash_nonzero_exit_is_a_structured_error(tmp_path: Path) -> None:
     tool = Bash()
@@ -113,13 +105,30 @@ async def test_bash_nonzero_exit_is_a_structured_error(tmp_path: Path) -> None:
 
     assert result.is_error is True
     assert "Exit code 7" in result.output
+    assert result.command_result is not None
+    assert result.command_result.exit_code == 7
+    assert result.command_result.timed_out is False
 
 
-@pytest.mark.phase1_gap
-@pytest.mark.xfail(
-    strict=True,
-    reason="PHASE1-CANCEL-TREE: Bash timeout kills only the shell process, not descendants",
-)
+@pytest.mark.runtime_contract
+@pytest.mark.asyncio
+async def test_bash_keeps_stdout_and_stderr_separate(tmp_path: Path) -> None:
+    tool = Bash()
+    tool.work_dir = str(tmp_path)
+    command = (
+        f'"{sys.executable}" -c "import sys; '
+        "print('out'); print('err', file=sys.stderr)\""
+    )
+
+    result = await tool.execute(BashParams(command=command, timeout=5))
+
+    assert result.is_error is False
+    assert result.command_result is not None
+    assert result.command_result.stdout.strip() == "out"
+    assert result.command_result.stderr.strip() == "err"
+
+
+@pytest.mark.runtime_contract
 @pytest.mark.asyncio
 async def test_bash_timeout_kills_descendant_processes(tmp_path: Path) -> None:
     marker = tmp_path / "descendant-survived.txt"
@@ -149,6 +158,42 @@ async def test_bash_timeout_kills_descendant_processes(tmp_path: Path) -> None:
 
     assert result.is_error is True
     assert descendant_survived is False
+    assert result.command_result is not None
+    assert result.command_result.timed_out is True
+
+
+@pytest.mark.runtime_contract
+@pytest.mark.asyncio
+async def test_bash_cancellation_kills_descendant_processes(tmp_path: Path) -> None:
+    marker = tmp_path / "cancel-descendant-survived.txt"
+    child = tmp_path / "cancel-child.py"
+    parent = tmp_path / "cancel-parent.py"
+    child.write_text(
+        "import pathlib, time\n"
+        "time.sleep(1.2)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('survived', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(child)!r}])\n"
+        "time.sleep(5)\n",
+        encoding="utf-8",
+    )
+    tool = Bash()
+    tool.work_dir = str(tmp_path)
+    task = asyncio.create_task(
+        tool.execute(
+            BashParams(command=f'"{sys.executable}" "{parent}"', timeout=10)
+        )
+    )
+    await asyncio.sleep(0.5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(1.2)
+    assert marker.exists() is False
 
 
 class RecordingHookEngine:
@@ -165,11 +210,7 @@ class RecordingHookEngine:
         return []
 
 
-@pytest.mark.phase1_gap
-@pytest.mark.xfail(
-    strict=True,
-    reason="PHASE1-LIFECYCLE: run_to_completion omits symmetric session lifecycle hooks",
-)
+@pytest.mark.runtime_contract
 @pytest.mark.asyncio
 async def test_run_to_completion_has_symmetric_session_lifecycle(tmp_path: Path) -> None:
     hooks = RecordingHookEngine()
@@ -186,3 +227,38 @@ async def test_run_to_completion_has_symmetric_session_lifecycle(tmp_path: Path)
 
     assert hooks.events[0] == "session_start"
     assert hooks.events[-1] == "session_end"
+
+
+class RaisingClient(LLMClient):
+    async def stream(
+        self,
+        conversation: ConversationManager,
+        system: str = "",
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if False:
+            yield StreamEnd("end_turn")
+        raise RuntimeError("provider failed")
+
+
+@pytest.mark.runtime_contract
+@pytest.mark.asyncio
+async def test_agent_lifecycle_is_symmetric_on_exception(tmp_path: Path) -> None:
+    hooks = RecordingHookEngine()
+    agent = Agent(
+        RaisingClient(),
+        ToolRegistry(),
+        "anthropic",
+        work_dir=str(tmp_path),
+        hook_engine=hooks,  # type: ignore[arg-type]
+    )
+    conversation = ConversationManager()
+    conversation.add_user_message("fail")
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        _ = [event async for event in agent.run(conversation)]
+
+    assert hooks.events[:2] == ["session_start", "turn_start"]
+    assert hooks.events[-2:] == ["turn_end", "session_end"]
+    assert hooks.events.count("turn_end") == 1
+    assert hooks.events.count("session_end") == 1
