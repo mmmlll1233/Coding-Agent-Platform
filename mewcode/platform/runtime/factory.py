@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mewcode.client import LLMClient
@@ -22,6 +22,12 @@ from mewcode.skills.loader import SkillLoader
 from mewcode.tools import ToolRegistry, create_default_registry
 from mewcode.tools.impl.tool_search import ToolSearchTool
 from mewcode.tools.load_skill import LoadSkill
+from mewcode.platform.execution import (
+    ExecutionEnvironment,
+    SensitiveValueRedactor,
+    WorkspacePathSandbox,
+    create_platform_registry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +68,7 @@ class RuntimeOptions:
     enable_verification_agent: bool = False
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
+    execution_environment: ExecutionEnvironment | None = None
 
 
 @dataclass
@@ -71,7 +78,7 @@ class AgentRuntime:
     client: LLMClient
     registry: ToolRegistry
     conversation: ConversationManager
-    workspace: Path
+    workspace: Path | PurePosixPath
     permission_checker: PermissionChecker
     session_manager: SessionManager | None = None
     session: Session | None = None
@@ -103,6 +110,9 @@ class AgentRuntime:
         if self._started:
             return
         self._started = True
+        execution_environment = self.services.get("execution_environment")
+        if execution_environment is not None:
+            await execution_environment.start()
         from mewcode import client as client_module
 
         await client_module.resolve_context_window(self.services["provider"])
@@ -143,6 +153,9 @@ class AgentRuntime:
             await self.mcp_manager.shutdown()
             self.mcp_manager = None
             self.services["mcp_manager"] = None
+        execution_environment = self.services.get("execution_environment")
+        if execution_environment is not None:
+            await execution_environment.aclose()
 
 
 class AgentRuntimeFactory:
@@ -151,6 +164,10 @@ class AgentRuntimeFactory:
     @staticmethod
     def _validate(options: RuntimeOptions) -> None:
         if options.profile != RuntimeProfile.PLATFORM:
+            if options.execution_environment is not None:
+                raise ValueError(
+                    "ExecutionEnvironment is supported only by the PLATFORM runtime"
+                )
             return
         forbidden: list[str] = []
         if options.hook_engine is not None:
@@ -167,6 +184,8 @@ class AgentRuntimeFactory:
             forbidden.append("subagents")
         if options.teammate_mode or options.enable_coordinator_mode:
             forbidden.append("teams")
+        if options.execution_environment is None:
+            forbidden.append("missing ExecutionEnvironment")
         if forbidden:
             raise ValueError(
                 "PLATFORM runtime forbids: " + ", ".join(forbidden)
@@ -175,12 +194,26 @@ class AgentRuntimeFactory:
     @classmethod
     def create(cls, options: RuntimeOptions) -> AgentRuntime:
         cls._validate(options)
-        workspace = Path(options.workspace).resolve()
         profile = options.profile
         platform_mode = profile == RuntimeProfile.PLATFORM
+        execution_environment = options.execution_environment
+        workspace: Path | PurePosixPath
+        if platform_mode:
+            assert execution_environment is not None
+            workspace = PurePosixPath(execution_environment.runtime_info.work_dir)
+        else:
+            workspace = Path(options.workspace).resolve()
         from mewcode import client as client_module
 
         client = client_module.create_client(options.provider)
+        redactor = SensitiveValueRedactor(
+            (
+                tuple(execution_environment.spec.secret_values)
+                + (options.provider.resolve_api_key(),)
+            )
+            if execution_environment is not None
+            else (options.provider.resolve_api_key(),)
+        )
 
         memory_manager: MemoryManager | None = None
         session_manager: SessionManager | None = None
@@ -201,14 +234,22 @@ class AgentRuntimeFactory:
 
             file_history = FileHistory(str(workspace), session.session_id)
 
-        registry = options.registry or create_default_registry(
-            file_cache=options.file_cache,
-            file_history=file_history,
-        )
+        if platform_mode:
+            assert execution_environment is not None
+            registry = create_platform_registry(execution_environment, redactor)
+        else:
+            registry = options.registry or create_default_registry(
+                file_cache=options.file_cache,
+                file_history=file_history,
+            )
 
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
-            sandbox=PathSandbox(str(workspace)),
+            sandbox=(
+                WorkspacePathSandbox()
+                if platform_mode
+                else PathSandbox(str(workspace))
+            ),
             rule_engine=(
                 RuleEngine()
                 if platform_mode
@@ -288,6 +329,17 @@ class AgentRuntimeFactory:
             repository_guidance=(
                 options.repository_guidance if platform_mode else ""
             ),
+            session_dir=(
+                execution_environment.spec.trusted_state_dir / "tool-results"
+                if platform_mode and execution_environment is not None
+                else None
+            ),
+            runtime_environment_info=(
+                execution_environment.runtime_info
+                if platform_mode and execution_environment is not None
+                else None
+            ),
+            result_redactor=(redactor.redact if platform_mode else None),
         )
         if session is not None:
             agent.session_id = session.session_id
@@ -331,5 +383,7 @@ class AgentRuntimeFactory:
                 "provider": options.provider,
                 "file_history": file_history,
                 "runtime_options": options,
+                "execution_environment": execution_environment,
+                "redactor": redactor,
             },
         )

@@ -50,3 +50,62 @@ jobs:
           ['git', 'status', '--porcelain', '--untracked-files=all'], text=True);
           print(status, end='');
           sys.exit(1 if status.strip() else 0)"
+
+  executor-security:
+    name: Ubuntu / Docker executor security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Build immutable test images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f docker/executor/Dockerfile -t mewcode-executor:ci .
+          docker build -f docker/mock-package/Dockerfile -t mewcode-mock-package:ci .
+          docker pull ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+          echo "MEWCODE_EXECUTOR_IMAGE=$(docker image inspect mewcode-executor:ci --format '{{.Id}}')" >> "$GITHUB_ENV"
+          echo "MEWCODE_MOCK_PACKAGE_IMAGE=$(docker image inspect mewcode-mock-package:ci --format '{{.Id}}')" >> "$GITHUB_ENV"
+          echo "MEWCODE_PROXY_IMAGE=sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c" >> "$GITHUB_ENV"
+
+      - name: Run Phase 2 executor security gate
+        run: >-
+          uv run pytest -q --strict-markers --enforce-platform-outcomes
+          -m executor_security
+
+      - name: Assert no Attempt Docker resources remain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(docker ps -aq --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker volume ls -q --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker network ls -q --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker ps -aq --filter label=com.mewcode.test-resource)"
+          test -z "$(docker network ls -q --filter label=com.mewcode.test-resource)"
+
+      - name: Verify tests left the checkout clean
+        run: >-
+          uv run python -c "import subprocess, sys;
+          status = subprocess.check_output(
+          ['git', 'status', '--porcelain', '--untracked-files=all'], text=True);
+          print(status, end='');
+          sys.exit(1 if status.strip() else 0)"

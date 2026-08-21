@@ -24,6 +24,9 @@ Docker Executor、Verification、GitHub 发布或平台 Job 终态。
 team 或 worktree 配置。平台策略位于 system prompt；显式传入的仓库指导以
 `trust="untrusted"` 用户上下文注入，不能覆盖平台策略。
 
+Phase 2 起，`PLATFORM` profile 还必须显式传入 ExecutionEnvironment；Docker
+隔离契约见 `docs/platform/phase2-docker-execution-environment.md`。
+
 ## 执行和取消契约
 
 所有工具调用统一执行：存在性/启用检查、pre-tool hook、权限检查、参数校验、
@@ -36,4 +39,3 @@ Object，超时和任务取消都会清理整棵进程树。
 
 session 和 turn 生命周期由主循环外层 `try/finally` 保证对称，正常完成、异常、
 取消或事件流提前关闭都会执行相应的结束 hook。
-

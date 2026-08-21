@@ -330,6 +330,9 @@ class Agent:
         hook_engine: HookEngine | None = None,
         trusted_system_instructions: str = "",
         repository_guidance: str = "",
+        session_dir: str | Path | None = None,
+        runtime_environment_info: Any | None = None,
+        result_redactor: Callable[[str], str] | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -343,7 +346,13 @@ class Agent:
             else PermissionMode.DEFAULT
         )
         self.context_window = context_window
-        self.session_dir = ensure_session_dir(work_dir)
+        if session_dir is None:
+            self.session_dir = ensure_session_dir(work_dir)
+        else:
+            self.session_dir = Path(session_dir)
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.runtime_environment_info = runtime_environment_info
+        self.result_redactor = result_redactor
         self.compact_breaker = CompactCircuitBreaker()
         self.replacement_state: ContentReplacementState = create_replacement_state()
         # 保存重建工作上下文所需的快照，在 Layer 2 压缩对话后使用：
@@ -528,7 +537,11 @@ class Agent:
     ) -> AsyncIterator[AgentEvent | _TurnStarted]:
         self._current_conversation = conversation
         env_context = build_environment_context(
-            self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
+            self.work_dir,
+            self.active_skills,
+            self._skill_catalog,
+            self._agent_catalog,
+            runtime_environment_info=self.runtime_environment_info,
         )
         conversation.inject_environment(env_context)
 
@@ -739,6 +752,7 @@ class Agent:
             )
 
             tool_results: list[ToolResultBlock] = []
+            terminal_tool_error: tuple[str, str] | None = None
             batches = partition_tool_calls(response.tool_calls, self.registry)
 
             for batch in batches:
@@ -814,6 +828,16 @@ class Agent:
                         elapsed=br.elapsed,
                         command_result=br.result.command_result,
                     )
+                    if (
+                        terminal_tool_error is None
+                        and br.result.fatal_error_code is not None
+                    ):
+                        terminal_tool_error = (
+                            br.result.fatal_error_code,
+                            br.result.fatal_error_message
+                            or br.result.output
+                            or "Execution environment failed",
+                        )
 
             if consecutive_unknown >= 3:
                 yield ErrorEvent(
@@ -827,6 +851,11 @@ class Agent:
                 tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
             )
             conversation.add_tool_results_message(tool_results)
+
+            if terminal_tool_error is not None:
+                code, message = terminal_tool_error
+                yield ErrorEvent(message=message, code=code, terminal=True)
+                break
 
             # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
             if self.memory_recall_task and not self._memory_recall_consumed:
@@ -982,6 +1011,25 @@ class Agent:
                 output=f"Tool execution error: {e}", is_error=True
             )
 
+        if self.result_redactor is not None:
+            result.output = self.result_redactor(result.output)
+            if result.fatal_error_message is not None:
+                result.fatal_error_message = self.result_redactor(
+                    result.fatal_error_message
+                )
+            if result.recovery_content is not None:
+                result.recovery_content = self.result_redactor(
+                    result.recovery_content
+                )
+            if result.command_result is not None:
+                command_result = result.command_result
+                result.command_result = CommandExecutionResult(
+                    exit_code=command_result.exit_code,
+                    stdout=self.result_redactor(command_result.stdout),
+                    stderr=self.result_redactor(command_result.stderr),
+                    timed_out=command_result.timed_out,
+                )
+
         self._snapshot_for_recovery(tc, result)
         return _ToolExecResult(
             tool_id=tc.tool_id,
@@ -1014,6 +1062,13 @@ class Agent:
         比从 tool 输出中反向解析行号要划算。
         """
         if result.is_error or tc.tool_name != "ReadFile":
+            return
+        if result.recovery_content is not None:
+            self.recovery_state.record_file_read(
+                result.recovery_path
+                or str(tc.arguments.get("file_path", "")),
+                result.recovery_content,
+            )
             return
         path = tc.arguments.get("file_path") if isinstance(tc.arguments, dict) else None
         if not path:
@@ -1083,8 +1138,12 @@ class Agent:
         )
         if isinstance(result, CompactEvent):
             env_context = build_environment_context(
-            self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
-        )
+                self.work_dir,
+                self.active_skills,
+                self._skill_catalog,
+                self._agent_catalog,
+                runtime_environment_info=self.runtime_environment_info,
+            )
             conversation.inject_environment(env_context)
             memory_content = self.memory_manager.load() if self.memory_manager else ""
             conversation.inject_long_term_memory(

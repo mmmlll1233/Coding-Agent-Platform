@@ -16,6 +16,10 @@ _Avoid_: Task, session, conversation
 One execution of a Job; a retried Job receives a new Attempt while retaining the same identity.
 _Avoid_: Run, retry task
 
+**Attempt Workspace**:
+The disposable isolated filesystem owned by exactly one Attempt; every retry receives a new one.
+_Avoid_: Job volume, shared workspace
+
 **Repository Target**:
 The GitHub repository and immutable base revision to which a Work Request applies.
 _Avoid_: Repo info, source address

@@ -369,11 +369,20 @@ def build_environment_context(
     active_skills: dict[str, str] | None = None,
     skill_catalog: str = "",
     agent_catalog: str = "",
+    runtime_environment_info: object | None = None,
 ) -> str:
+    if runtime_environment_info is None:
+        operating_system = f"{platform.system()} {platform.release()}"
+        shell = detect_environment(work_dir).shell
+    else:
+        operating_system = str(
+            getattr(runtime_environment_info, "operating_system", "Linux")
+        )
+        shell = str(getattr(runtime_environment_info, "shell", "/bin/sh"))
     parts = [
         f"Current working directory: {work_dir}",
-        f"Operating system: {platform.system()} {platform.release()}",
-        f"Command shell: {detect_environment(work_dir).shell}",
+        f"Operating system: {operating_system}",
+        f"Command shell: {shell}",
         f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "Use ReadFile/Glob/Grep for file inspection; do not use Unix-only shell commands like cat to decide whether a file exists.",
     ]

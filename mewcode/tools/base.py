@@ -33,6 +33,14 @@ class ToolResult:
     output: str
     is_error: bool = False
     command_result: CommandExecutionResult | None = None
+    # Platform-only fatal failures terminate the Agent loop after the tool
+    # result has been projected. Local tools leave these fields unset.
+    fatal_error_code: str | None = None
+    fatal_error_message: str | None = None
+    # ReadFile can attach the unnumbered content for RecoveryState without
+    # forcing the Agent process to reopen an isolated workspace path.
+    recovery_path: str | None = None
+    recovery_content: str | None = None
 
 
 class Tool(ABC):

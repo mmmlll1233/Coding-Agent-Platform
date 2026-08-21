@@ -2,7 +2,7 @@
 
 ## 1. 目的与范围
 
-本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 的测试依据，不代表 Control API、Docker Executor 或 GitHub App 已经实现。
+本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API、GitHub App、Verification 发布链路和通知仍属于后续阶段。
 
 MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、构建脚本、依赖代码、Agent 生成的命令和 Verification 命令全部视为不可信输入。内部单租户降低了身份和计费复杂度，但不降低仓库内容、供应链代码或提示注入的风险。
 
@@ -22,7 +22,7 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 
 - 源码、未提交 diff、附件以及内部业务信息。
 - LLM API Key、GitHub App private key、installation token、飞书 webhook 和签名 secret。
-- 宿主文件、用户目录、Docker socket、其他 Job 工作区和平台私网。
+- 宿主文件、用户目录、Docker socket、其他 Attempt Workspace 和平台私网。
 - Job、Attempt、Event、Artifact、Outbox 数据及其租户和顺序边界。
 - 固定 base SHA、Verification 证据、发布分支和 Draft Pull Request 的完整性。
 - Worker、Executor、Notifier 的可用性及资源容量。
@@ -49,7 +49,7 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 | `CRED-002` | 模型或工具把已观察到的敏感值写入日志、Event、Artifact 或 diff | 所有出口统一 redaction；发现 canary 时 Attempt 失败并报警 | `secret_canary` | Phase 3/5/6 |
 | `FS-001` | 使用 `..`、绝对路径、`~` 或 symlink 访问 workspace 外文件 | 统一路径边界和最小挂载；越界操作被拒绝 | `workspace_escape` | Phase 2 |
 | `PROC-001` | 超时命令派生子孙进程，取消 coroutine 后继续运行 | kill 进程组并销毁容器；发现残留时 Attempt 失败 | `timeout_process_tree` | Phase 1/2 |
-| `RES-001` | 持续写文件耗尽 Job 或宿主磁盘 | Job 磁盘/文件数限制，写满只影响当前 Job | `disk_exhaustion` | Phase 2/7 |
+| `RES-001` | 持续写文件耗尽 Attempt 或宿主磁盘 | Attempt Workspace 的 size/inode 限制，写满只影响当前 Attempt | `disk_exhaustion` | Phase 2/7 |
 | `RES-002` | fork/spawn 大量进程耗尽 PID | 容器 PID 限制和终态清理 | `pid_exhaustion` | Phase 2/7 |
 | `NET-001` | 访问环回、RFC1918、云元数据、宿主服务或任意公网 | Executor 只能经过 egress proxy 访问平台白名单 | `egress_probe` | Phase 2/7 |
 | `SCM-001` | Agent 命令读取或复用 GitHub installation token | token 只存在于 SCM Adapter，Executor 的 Git remote 不含凭证 | `secret_canary` 加 SCM 集成测试 | Phase 4 |
@@ -63,8 +63,10 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 - 默认测试只验证安全夹具清单、威胁追踪完整性和宿主执行保护，不执行资源耗尽或真实网络探测。
 - 所有安全脚本要求 `MEWCODE_SECURITY_FIXTURE=executor` 才能运行，并带硬编码的运行时间、输出、进程数或写入字节上限。
 - canary 必须是测试时生成的假值，不得在仓库中保存真实 provider、GitHub 或飞书凭证。
-- Phase 1 的已知 Agent Runtime 缺陷用严格 `xfail` 固化；Phase 2 取得 Docker Executor 后再把七类夹具接入隔离执行断言。
-- 默认 CI 不访问真实 LLM、GitHub、飞书、Docker daemon 或任意测试目标网络。
+- Phase 1 的已知 Agent Runtime 缺陷已升级为普通契约测试；Phase 2 的七类夹具已接入 Docker 隔离执行断言。
+- 默认单元测试门禁不访问真实 LLM、GitHub、飞书或 Docker daemon；独立的
+  Ubuntu Phase 2 门禁只访问本机 Docker daemon 和同一 egress bridge 上的 HTTPS
+  mock endpoint，不访问外部测试目标。
 
 ## 7. 评审和变更规则
 
@@ -97,5 +99,23 @@ python -m pytest -q --strict-markers --enforce-platform-outcomes \
 四个 Phase 1 `xfail` 已全部升级为普通测试。统一 policy gate、结构化 Bash
 结果、Windows Job Object/POSIX process group 取消、对称 lifecycle、Runtime
 profile 隔离以及 JobRunner 四类结果均已有自动化覆盖。唯一 skip 仍是 Windows
-缺少 symlink 创建能力时的 `PHASE0-CAPABILITY-SYMLINK`；Docker、资源耗尽和
-真实隔离断言继续由 Phase 2 负责。
+缺少 symlink 创建能力时的 `PHASE0-CAPABILITY-SYMLINK`。Docker、资源耗尽和
+真实隔离断言的已交付结果见下方 Phase 2 验收记录。
+
+## 10. Phase 2 验收记录
+
+2026-08-21 在 Docker Desktop Linux Engine、cgroup v2、Python 3.13 上执行：
+
+```text
+python -m pytest -q tests/platform/test_docker_execution.py -m executor_security
+6 passed, 2 deselected
+
+python -m pytest -q tests/platform/test_docker_execution.py -m resource_exhaustion
+2 passed, 6 deselected
+```
+
+安全门禁覆盖 secret canary、路径和 symlink 逃逸、`.github` 只读、提示注入配置
+隔离、Docker inspect 契约、超时/取消进程树、输出上限、proxy-only egress、磁盘和
+PID 限制。出网成功路径使用同一 Docker egress bridge 上的本地 HTTPS mock
+package endpoint；测试不依赖真实 PyPI。每个用例结束后按 Attempt labels 验证
+container、network 和 volume 在 10 秒内清零，未使用全局 Docker prune。

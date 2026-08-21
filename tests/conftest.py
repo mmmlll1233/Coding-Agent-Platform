@@ -95,7 +95,7 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
 
 @pytest.fixture(autouse=True)
 def isolate_user_home_and_network(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     """Keep tests away from the real home directory and external network."""
     fake_home = tmp_path / "isolated-home"
@@ -103,6 +103,10 @@ def isolate_user_home_and_network(
     original_expanduser = Path.expanduser
     original_connect = socket.socket.connect
     original_connect_ex = socket.socket.connect_ex
+    docker_test = bool(
+        request.node.get_closest_marker("executor_security")
+        or request.node.get_closest_marker("resource_exhaustion")
+    )
 
     def isolated_expanduser(path: Path) -> Path:
         raw = str(path).replace("\\", "/")
@@ -113,12 +117,16 @@ def isolate_user_home_and_network(
         return original_expanduser(path)
 
     def guarded_connect(sock, address):
+        if docker_test and isinstance(address, str) and address == "/var/run/docker.sock":
+            return original_connect(sock, address)
         host = address[0] if isinstance(address, tuple) and address else ""
         if host in {"127.0.0.1", "::1", "localhost"}:
             return original_connect(sock, address)
         raise AssertionError("real network access is forbidden in the default test suite")
 
     def guarded_connect_ex(sock, address):
+        if docker_test and isinstance(address, str) and address == "/var/run/docker.sock":
+            return original_connect_ex(sock, address)
         host = address[0] if isinstance(address, tuple) and address else ""
         if host in {"127.0.0.1", "::1", "localhost"}:
             return original_connect_ex(sock, address)

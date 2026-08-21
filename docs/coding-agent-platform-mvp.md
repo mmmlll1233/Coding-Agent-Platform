@@ -13,7 +13,7 @@ MVP 面向内部单租户调用方，把一个结构化 Work Request 异步执�
 - 首版只监听本机 `127.0.0.1`，使用 API Key 认证。
 - 本地 MVP 同时只运行 1 个 Job、单仓库不超过 2 GB、单 Job 最长 60 分钟、自动重试 1 次；迁移到服务器并完成压测后再把目标提高到 5 个并发 Job。
 - 支持普通 Git 仓库，不支持 Git LFS、submodule、跨仓库修改或 `.github/workflows/**` 修改。
-- Job 容器只允许访问批准的公共依赖源；GitHub、LLM 和飞书凭证不进入 Job 容器。
+- Executor Container 只允许访问批准的公共依赖源；GitHub、LLM 和飞书凭证不进入 Executor。
 - Job 元数据和事件保留 30 天，失败日志、diff 和测试报告保留 7 天，临时工作区终态后销毁。
 
 不在 MVP 范围内：多租户 SaaS、计费、自动合并、GitHub Issue 触发、飞书内直接回复、私有依赖网络、多 Agent 团队、长期跨 Job 记忆和生产级 Kubernetes 调度。
@@ -32,8 +32,8 @@ flowchart LR
 
     Worker --> Runner["AgentRunner"]
     Runner --> LLM["外部 LLM API"]
-    Runner --> Exec["临时 Job Executor Container"]
-    Exec --> Proxy["受限 Egress Proxy"]
+    Runner --> Exec["临时 Attempt Executor Container"]
+    Exec --> Proxy["每 Attempt Egress Proxy"]
     Proxy --> Packages["批准的公共依赖源"]
 
     Worker --> Artifacts["本地 Artifact Store"]
@@ -45,8 +45,8 @@ flowchart LR
 
 - `api`、`worker`、`notifier` 是受信任组件。
 - `AgentRunner` 持有 LLM 访问能力，但不把 LLM API Key传给命令执行环境。
-- SCM Adapter 即时申请 GitHub App installation token，并负责 checkout、commit、push 和创建 PR；token 不进入 Agent prompt、工具参数、日志或 Job 容器。
-- Executor Container 只包含工作区、清洗后的环境变量和资源配额，不挂载 Docker socket、宿主目录、`.env` 或长期凭证。
+- SCM Adapter 即时申请 GitHub App installation token，并负责 checkout、commit、push 和创建 PR；token 不进入 Agent prompt、工具参数、日志或 Executor。
+- Executor Container 只包含 Attempt Workspace、清洗后的环境变量和资源配额，不挂载 Docker socket、宿主目录、`.env` 或长期凭证。
 - 仓库文件、构建脚本、测试代码、附件和 Work Request 文本全部按不可信输入处理。
 
 ## 3. 本地 Docker Compose 拓扑
@@ -59,7 +59,6 @@ flowchart LR
 | `postgres` | Job、Attempt、Event、租约、Outbox | 不暴露宿主端口 |
 | `worker` | 领取 Job、驱动 SCM/Agent/Verification | 无 |
 | `notifier` | 可靠投递飞书消息 | 无 |
-| `egress-proxy` | Job 容器公共依赖域名白名单 | 无 |
 
 本地 Artifact Store 使用命名卷或 Compose 管理的数据目录，不在 MVP 引入 MinIO。存储接口保持可替换，服务器部署时可以换为 S3 兼容对象存储。
 
@@ -213,10 +212,10 @@ API Key 只在创建时显示，数据库保存哈希；日志只记录 key id�
 
 1. **接收**：认证、schema 校验、Idempotency-Key 去重。
 2. **仓库验证**：确认 GitHub App installation 对仓库有权；解析并保存 `base_sha`。
-3. **准备工作区**：SCM Adapter 在新的 Job 卷中获取固定 SHA；禁用 submodule、LFS 和 Git hooks；清除凭证和 remote URL 中的敏感信息。
-4. **启动 Executor**：非 root 用户、只挂载 Job 工作区、清洗环境变量、限制 CPU/内存/PID/磁盘和总时长；不挂载 Docker socket。
+3. **准备工作区**：SCM Adapter 从固定 SHA 为新 Attempt 创建干净的 Attempt Workspace；禁用 submodule、LFS 和 Git hooks；清除凭证和 remote URL 中的敏感信息。
+4. **启动 Executor**：非 root 用户、只挂载当前 Attempt Workspace、清洗环境变量、限制 CPU/内存/PID/磁盘和总时长；不挂载 Docker socket。
 5. **Setup**：逐条运行调用方提供的 setup commands；失败时生成结构化日志并进入 `FAILED` 或 `NEEDS_INPUT`。
-6. **分析与修改**：AgentRunner 复用现有 Agent 循环，但所有文件访问绑定 Job workspace，所有 Bash 调用委托给 Executor。
+6. **分析与修改**：AgentRunner 复用现有 Agent 循环，但所有文件访问绑定 Attempt Workspace，所有 Bash 调用委托给 Executor。
 7. **Verification**：平台而不是 Agent 逐条执行 Verification Contract；所有 exit code 必须为 0。失败结果最多反馈给 Agent 进行两轮修复，再执行完整 Verification。
 8. **形成 Delivery**：Verification 成功后，受信任 SCM Adapter 生成提交、推送 `mewcode/{job_id}` 分支，并幂等创建 Draft PR。
 9. **持久化终态**：写入 PR URL、最终 commit、Verification 报告和 usage，然后置为 `SUCCEEDED`。
@@ -242,8 +241,8 @@ PR 内容固定包含：Work Request 摘要、修改说明、Verification 命令
 ### Executor
 
 - 非 root、只读根文件系统、最小可写挂载、drop capabilities、`no-new-privileges`。
-- 限制 CPU、内存、PID、文件数、磁盘、命令超时和 Job deadline。
-- Job 网络只连接内部网络和 egress proxy；允许域名由平台配置，不由 Work Request 或仓库修改。
+- 限制 CPU、内存、PID、文件数、磁盘、命令超时和 Attempt deadline。
+- Attempt network 只连接内部网络和 egress proxy；允许域名由平台配置，不由 Work Request 或仓库修改。
 - Cancel/timeout 必须杀死进程组并最终销毁容器，不能只取消 Python coroutine。
 
 ### 平台自身
@@ -277,7 +276,7 @@ mewcode/platform/
 - `Agent.run()` 与 `run_to_completion()` 收敛为统一的结构化结果和对称生命周期。
 - 新增 `AgentRuntimeFactory`，消除 CLI、TUI 和 Remote 的初始化分叉。
 - Bash 工具委托 `ExecutionEnvironment`，支持结构化退出状态、进程组取消和容器执行。
-- Context、Session、tool-result spill 和 RecoveryState 全部显式绑定 `job_id/attempt_id`。
+- Context、tool-result spill 和 RecoveryState 全部显式绑定 `job_id/attempt_id`，并存放在不挂载进 Executor 的受信任 Attempt 状态目录。
 - 平台模式禁用 Memory、Team、SubAgent、项目 hooks/MCP/skills，后续逐项安全评估后再启用。
 - AgentEvent 映射为持久化 JobEvent；现有 UI 仍可继续消费 AgentEvent。
 - WorktreeManager 保留给本地 CLI/团队协作；平台的初始 checkout 与最终发布由 SCM Adapter 管理。
@@ -304,8 +303,14 @@ RuntimeFactory；四个 Phase 1 严格 `xfail` 已升级为普通契约测试。
 
 ### Phase 2：Docker ExecutionEnvironment（5～7 天）
 
-- 实现 Job volume、临时容器、资源限制、清洗 env、进程组取消和 egress proxy。
+- 实现 Attempt Workspace、短命令容器、资源限制、清洗 env、整容器取消和每 Attempt egress proxy。
 - 禁用仓库 hooks/config/MCP/skills/memory及 workspace 外读取。
+
+交付状态（2026-08-21）：已完成。`PLATFORM` profile 现在强制要求
+ExecutionEnvironment；每个 Attempt 使用有界 tmpfs workspace、internal network、
+非 root Squid 侧车和短命令容器。文件访问、统一脱敏、fatal 终止及按 labels 的
+有界清理已有单元与 Docker 恶意夹具覆盖。接口和运行说明见
+`docs/platform/phase2-docker-execution-environment.md`，隔离取舍见 ADR 0010。
 
 验收：恶意测试仓库无法读取 LLM/GitHub/飞书 secrets、宿主文件或 Docker socket；取消后没有残留进程和容器。
 
@@ -355,7 +360,7 @@ RuntimeFactory；四个 Phase 1 严格 `xfail` 已升级为普通契约测试。
 4. 准备外部 LLM API Key，并确认内部代码允许发送给该供应商。
 5. 创建飞书群自定义机器人，保存 webhook/签名 secret。
 6. 选一个不使用 LFS/submodule、能用一组确定命令安装和测试的试点仓库。
-7. 确认开发电脑有足够的 Docker 磁盘空间；Job workspace 使用 Linux named volume，避免大量源码直接放在 Windows bind mount 上造成性能损失。
+7. 确认开发电脑有足够的 Docker 内存；Attempt Workspace 使用有硬上限的 Linux tmpfs named volume，不使用 Windows bind mount。
 
 ## 12. Go/No-Go 标准
 
