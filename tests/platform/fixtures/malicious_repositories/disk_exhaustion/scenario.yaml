@@ -1,0 +1,15 @@
+case_id: disk_exhaustion
+threat_ids: [RES-001]
+target_phase: 2
+command: [python, fill_disk.py]
+expected_controls:
+  - job_disk_quota_enforced
+  - host_disk_unchanged
+  - partial_file_cleaned
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 10
+  max_output_bytes: 65536
+  max_processes: 1
+  max_write_bytes: 67108864

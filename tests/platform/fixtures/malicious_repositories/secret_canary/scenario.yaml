@@ -1,0 +1,15 @@
+case_id: secret_canary
+threat_ids: [CRED-001, CRED-002, SCM-001]
+target_phase: 2
+command: [python, probe.py]
+expected_controls:
+  - trusted_service_credentials_absent
+  - git_remote_credentials_absent
+  - all_outputs_redacted
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 5
+  max_output_bytes: 131072
+  max_processes: 1
+  max_write_bytes: 0

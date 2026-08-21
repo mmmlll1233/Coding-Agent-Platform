@@ -1,6 +1,9 @@
 config.yaml
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
+htmlcov/
 .venv/
 *.egg-info/
 dist/
@@ -8,6 +11,8 @@ build/
 .idea/
 .vscode/
 .mewcode/
+!tests/platform/fixtures/malicious_repositories/prompt_injection/.mewcode/
+!tests/platform/fixtures/malicious_repositories/prompt_injection/.mewcode/**
 .claude/
 CLAUDE.md
 

@@ -132,7 +132,15 @@ class TestLoadInstructions:
         assert result.index("root level") < result.index("legacy level")
         assert "---" in result
 
-    def test_no_files_returns_empty(self, tmp_path: Path) -> None:
+    def test_no_files_returns_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        monkeypatch.setattr(
+            "mewcode.memory.instructions._find_git_root", lambda start: None
+        )
         result = load_instructions(str(tmp_path))
         assert result == ""
 

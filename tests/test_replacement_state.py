@@ -1,4 +1,4 @@
-"""ContentReplacementState 的测试 —— 方案 B（决策冻结，不做原地修改）。"""
+"""ContentReplacementState 的测试 —— 方案 A（决策冻结、就地替换）。"""
 from __future__ import annotations
 
 import json
@@ -48,25 +48,20 @@ def test_clone_independent() -> None:
     assert cloned.replacements == {"a": "preview_a", "b": "preview_b"}
 
 # ---------------------------------------------------------------------------
-# 方案 B：apply 不会修改传入的会话
+# 方案 A：apply 就地修改传入的会话
 # ---------------------------------------------------------------------------
 
-def test_apply_does_not_mutate_conv(tmp_path: Path) -> None:
+def test_apply_mutates_conv_in_place(tmp_path: Path) -> None:
     big = "x" * (SINGLE_RESULT_CHAR_LIMIT + 100)
     conv = _one_msg_conv(ToolResultBlock(tool_use_id="t1", content=big))
-    orig_content = conv.history[0].tool_results[0].content
     orig_history_id = id(conv.history)
     state = create_replacement_state()
 
-    api_conv, _ = apply_tool_result_budget(conv, tmp_path, state)
+    records = apply_tool_result_budget(conv, tmp_path, state)
 
-    # 原始 conv 必须保持不变（方案 B 的不变量）
-    assert conv.history[0].tool_results[0].content == orig_content
-    # api_conv 是另一个 ConversationManager，底层由另一个列表支撑
-    assert api_conv is not conv
-    assert api_conv.history is not conv.history
-    # 并且它携带了替换后的内容
-    assert api_conv.history[0].tool_results[0].content.startswith(PERSISTED_TAG)
+    assert id(conv.history) == orig_history_id
+    assert conv.history[0].tool_results[0].content.startswith(PERSISTED_TAG)
+    assert records[0].replacement == conv.history[0].tool_results[0].content
 
 def test_first_call_freezes_unreplaced(tmp_path: Path) -> None:
     """未超出预算的结果必须被标记为已见，但不应加入 replacements。"""
@@ -74,7 +69,7 @@ def test_first_call_freezes_unreplaced(tmp_path: Path) -> None:
     conv = _one_msg_conv(ToolResultBlock(tool_use_id="t1", content=small))
     state = create_replacement_state()
 
-    _, records = apply_tool_result_budget(conv, tmp_path, state)
+    records = apply_tool_result_budget(conv, tmp_path, state)
 
     assert state.seen_ids == {"t1"}
     assert state.replacements == {}
@@ -90,11 +85,11 @@ def test_replacement_byte_identical(tmp_path: Path) -> None:
     conv = _one_msg_conv(ToolResultBlock(tool_use_id="t_big", content=big))
     state = create_replacement_state()
 
-    api1, recs1 = apply_tool_result_budget(conv, tmp_path, state)
-    api2, recs2 = apply_tool_result_budget(conv, tmp_path, state)
+    recs1 = apply_tool_result_budget(conv, tmp_path, state)
+    c1 = conv.history[0].tool_results[0].content
+    recs2 = apply_tool_result_budget(conv, tmp_path, state)
+    c2 = conv.history[0].tool_results[0].content
 
-    c1 = api1.history[0].tool_results[0].content
-    c2 = api2.history[0].tool_results[0].content
     assert c1 == c2, "second pass must produce byte-identical content"
     assert recs1[0].replacement == c1
     # 第二次只是纯粹的重新应用：不产生新记录，也不写入新文件
@@ -124,11 +119,11 @@ def test_frozen_never_replaced(tmp_path: Path) -> None:
         ToolResultBlock(tool_use_id="t2", content=fresh_large)
     )
 
-    api_conv, _ = apply_tool_result_budget(conv, tmp_path, state)
+    apply_tool_result_budget(conv, tmp_path, state)
 
     # 第 1 趟会单独溢出 t2（它 > SINGLE_RESULT_CHAR_LIMIT），所以无论聚合大小如何，
     # t1 都保持原始内容。关键在于：t1 从未被重新纳入考量。
-    api_t1 = next(tr for tr in api_conv.history[0].tool_results if tr.tool_use_id == "t1")
+    api_t1 = next(tr for tr in conv.history[0].tool_results if tr.tool_use_id == "t1")
     assert api_t1.content == "a" * quarter
     assert "t1" not in state.replacements
 
@@ -146,10 +141,10 @@ def test_aggregate_only_picks_fresh(tmp_path: Path) -> None:
     # 聚合 = 5 * 4999 = 24995 > 20000
     state = create_replacement_state()
 
-    api_conv, recs = apply_tool_result_budget(conv, tmp_path, state)
+    recs = apply_tool_result_budget(conv, tmp_path, state)
 
     # 部分结果被替换；现在总量 ≤ 上限
-    api_total = sum(len(tr.content) for tr in api_conv.history[0].tool_results)
+    api_total = sum(len(tr.content) for tr in conv.history[0].tool_results)
     assert api_total <= AGGREGATE_CHAR_LIMIT
     assert len(recs) >= 1, "at least one result should have been spilled"
 

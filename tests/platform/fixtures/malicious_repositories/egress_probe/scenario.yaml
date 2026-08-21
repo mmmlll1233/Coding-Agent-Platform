@@ -1,0 +1,16 @@
+case_id: egress_probe
+threat_ids: [NET-001]
+target_phase: 2
+command: [python, probe.py]
+expected_controls:
+  - loopback_and_private_network_denied
+  - metadata_service_denied
+  - non_allowlisted_domains_denied
+  - approved_dependency_sources_allowed
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 10
+  max_output_bytes: 65536
+  max_processes: 1
+  max_write_bytes: 0

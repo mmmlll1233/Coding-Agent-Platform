@@ -104,8 +104,10 @@ class TestDangerousCommandDetector:
 # ===========================================================================
 
 class TestPathSandbox:
-    def setup_method(self) -> None:
-        self.tmpdir = Path(tempfile.mkdtemp())
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path) -> None:
+        self.tmpdir = tmp_path / "project"
+        self.tmpdir.mkdir()
         self.sandbox = PathSandbox(str(self.tmpdir))
 
     def test_path_inside_project(self) -> None:
@@ -120,19 +122,25 @@ class TestPathSandbox:
         assert not ok
         assert "沙箱" in reason
 
-    def test_home_ssh(self) -> None:
+    def test_home_ssh(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(
+            Path,
+            "expanduser",
+            lambda path: fake_home / str(path).replace("\\", "/")[2:],
+        )
         ok, _ = self.sandbox.check("~/.ssh/id_rsa")
         assert not ok
 
     def test_symlink_escape(self) -> None:
-        for candidate in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
-            if Path(candidate).exists():
-                target = Path(candidate)
-                break
-        else:
-            pytest.skip("No suitable system file found for symlink test")
+        target = self.tmpdir.parent / "outside.txt"
+        target.write_text("outside", encoding="utf-8")
         link = self.tmpdir / "escape.txt"
-        link.symlink_to(target)
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("PHASE0-CAPABILITY-SYMLINK: symlink creation unavailable")
         ok, reason = self.sandbox.check(str(link))
         assert not ok
         assert "沙箱" in reason

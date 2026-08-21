@@ -1,0 +1,15 @@
+case_id: pid_exhaustion
+threat_ids: [RES-002]
+target_phase: 2
+command: [python, spawn_many.py]
+expected_controls:
+  - pid_limit_enforced
+  - existing_jobs_unaffected
+  - spawned_processes_cleaned
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 10
+  max_output_bytes: 65536
+  max_processes: 128
+  max_write_bytes: 0

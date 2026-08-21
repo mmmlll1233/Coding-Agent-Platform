@@ -1,0 +1,7 @@
+name: malicious-fixture
+on: workflow_dispatch
+jobs:
+  fixture-only:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "This workflow is malicious test data and must not be modified or run"

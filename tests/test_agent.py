@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, AsyncIterator
 
 import pytest
@@ -119,23 +118,20 @@ async def test_single_step_tool_call():
     assert c["loop"][0].total_turns == 2
 
 @pytest.mark.asyncio
-async def test_multi_step_autonomous():
+async def test_multi_step_autonomous(tmp_path):
     """Agent 先 WriteFile 再 ReadFile 然后停止 —— 端到端的多步流程。"""
-    # 清理残留文件，避免 read-before-edit 拦截新文件创建
-    test_file = "/tmp/mewcode_test_hello.txt"
-    if os.path.exists(test_file):
-        os.remove(test_file)
+    test_file = tmp_path / "mewcode_test_hello.txt"
     client = MockLLMClient([
         # 第 1 轮：WriteFile
         [
             TextDelta("Creating file."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "/tmp/mewcode_test_hello.txt", "content": "Hello World"}),
+            ToolCallComplete("t1", "WriteFile", {"file_path": str(test_file), "content": "Hello World"}),
             StreamEnd("end_turn", input_tokens=10, output_tokens=20),
         ],
         # 第 2 轮：ReadFile 进行验证
         [
             TextDelta("Verifying content."),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/mewcode_test_hello.txt"}),
+            ToolCallComplete("t2", "ReadFile", {"file_path": str(test_file)}),
             StreamEnd("end_turn", input_tokens=40, output_tokens=25),
         ],
         # 第 3 轮：最终答案
@@ -145,7 +141,7 @@ async def test_multi_step_autonomous():
         ],
     ])
     registry = create_default_registry()
-    agent = Agent(client, registry, "anthropic", work_dir="/tmp")
+    agent = Agent(client, registry, "anthropic", work_dir=str(tmp_path))
     conv = ConversationManager()
     conv.add_user_message("Create hello.txt with Hello World, then verify")
 
@@ -214,8 +210,12 @@ async def test_stop_max_iterations():
     assert "maximum iterations" in c["error"][0].message
 
 @pytest.mark.asyncio
-async def test_stop_cancel():
+async def test_stop_cancel(tmp_path):
     """Agent 在收到 CancelledError 时干净地停止。"""
+
+    probe = tmp_path / "probe.txt"
+    probe.write_text("ready", encoding="utf-8")
+    second_call_started = asyncio.Event()
 
     class SlowMockClient(LLMClient):
         """在事件之间 sleep 的 mock 客户端，以便留出取消的时机。"""
@@ -229,16 +229,18 @@ async def test_stop_cancel():
             tools: list[dict[str, Any]] | None = None,
         ) -> AsyncIterator[StreamEvent]:
             self._call_count += 1
-            await asyncio.sleep(0.01)
-            yield TextDelta(f"Step {self._call_count}")
-            await asyncio.sleep(0.01)
-            yield ToolCallComplete(f"t{self._call_count}", "ReadFile", {"file_path": "README.md"})
-            await asyncio.sleep(0.01)
-            yield StreamEnd("end_turn", input_tokens=10, output_tokens=10)
+            if self._call_count == 1:
+                yield TextDelta("Step 1")
+                yield ToolCallComplete("t1", "ReadFile", {"file_path": str(probe)})
+                yield StreamEnd("end_turn", input_tokens=10, output_tokens=10)
+                return
+
+            second_call_started.set()
+            await asyncio.Event().wait()
 
     client = SlowMockClient()
     registry = create_default_registry()
-    agent = Agent(client, registry, "anthropic")
+    agent = Agent(client, registry, "anthropic", work_dir=str(tmp_path))
     conv = ConversationManager()
     conv.add_user_message("Do something")
 
@@ -250,7 +252,7 @@ async def test_stop_cancel():
             events.append(e)
 
     task = asyncio.create_task(run_agent())
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(second_call_started.wait(), timeout=1)
     task.cancel()
     try:
         await task
@@ -259,8 +261,7 @@ async def test_stop_cancel():
 
     assert cancelled
     c = _collect(events)
-    assert len(c["turn"]) >= 1
-    assert len(c["turn"]) < 50
+    assert len(c["turn"]) == 1
 
 @pytest.mark.asyncio
 async def test_stop_consecutive_unknown_tools():
@@ -327,12 +328,16 @@ async def test_message_splicing():
     assert tool_results_msg["content"][1]["tool_use_id"] == "t2"
 
 @pytest.mark.asyncio
-async def test_concurrent_batch_execution():
+async def test_concurrent_batch_execution(tmp_path):
     """多个 ReadFile 调用并发执行（属于同一批次）。"""
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
     client = MockLLMClient([
         [
-            ToolCallComplete("t1", "ReadFile", {"file_path": "README.md"}),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "pyproject.toml"}),
+            ToolCallComplete("t1", "ReadFile", {"file_path": str(first)}),
+            ToolCallComplete("t2", "ReadFile", {"file_path": str(second)}),
             StreamEnd("end_turn", input_tokens=10, output_tokens=20),
         ],
         [
@@ -341,7 +346,7 @@ async def test_concurrent_batch_execution():
         ],
     ])
     registry = create_default_registry()
-    agent = Agent(client, registry, "anthropic", work_dir=".")
+    agent = Agent(client, registry, "anthropic", work_dir=str(tmp_path))
     conv = ConversationManager()
     conv.add_user_message("Read both")
 

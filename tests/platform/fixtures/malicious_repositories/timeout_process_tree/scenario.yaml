@@ -1,0 +1,15 @@
+case_id: timeout_process_tree
+threat_ids: [PROC-001]
+target_phase: 2
+command: [python, process_tree.py]
+expected_controls:
+  - process_group_cancelled
+  - descendant_processes_removed
+  - executor_destroyed
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 5
+  max_output_bytes: 65536
+  max_processes: 3
+  max_write_bytes: 1048576

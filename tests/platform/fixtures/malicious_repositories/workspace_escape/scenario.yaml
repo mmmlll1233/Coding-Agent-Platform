@@ -1,0 +1,15 @@
+case_id: workspace_escape
+threat_ids: [FS-001]
+target_phase: 2
+command: [python, probe.py]
+expected_controls:
+  - parent_traversal_denied
+  - absolute_and_home_paths_denied
+  - symlink_escape_denied
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 5
+  max_output_bytes: 65536
+  max_processes: 1
+  max_write_bytes: 4096

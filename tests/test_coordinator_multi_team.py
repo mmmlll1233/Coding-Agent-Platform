@@ -6,11 +6,9 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 from unittest.mock import MagicMock
 
 from mewcode.teams.manager import TeamManager
-from mewcode.teams.models import resolve_team_dir
 from mewcode.tools.team_create import TeamCreateTool, TeamCreateParams
 from mewcode.tools.team_delete import TeamDeleteTool, TeamDeleteParams
 from mewcode.tools import ToolRegistry
@@ -50,62 +48,61 @@ class FakeAgent:
         self._team_manager = None
 
 
-def cleanup(*names):
-    for n in names:
-        d = resolve_team_dir(n)
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
+def _isolate_team_storage(monkeypatch, tmp_path):
+    teams_dir = tmp_path / "teams"
+    monkeypatch.setattr(
+        "mewcode.teams.manager.resolve_team_dir",
+        lambda name: teams_dir / name,
+    )
+    monkeypatch.setattr(
+        "mewcode.teams.manager.unique_team_name",
+        lambda name: name,
+    )
 
 
-def test_deleting_one_of_two_teams_should_not_restore_full_tools():
-    cleanup("coordbug1", "coordbug2")
-    try:
-        tm = TeamManager()
-        full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
-        agent = FakeAgent(full_registry)
+def test_deleting_one_of_two_teams_should_not_restore_full_tools(monkeypatch, tmp_path):
+    _isolate_team_storage(monkeypatch, tmp_path)
+    tm = TeamManager()
+    full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
+    agent = FakeAgent(full_registry)
 
-        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
-        r1 = asyncio.run(create.execute(TeamCreateParams(team_name="coordbug1")))
-        assert not r1.is_error
-        assert agent.coordinator_mode is True
-        restricted_names = {t.name for t in agent.registry.list_tools()}
-        assert "WriteFile" not in restricted_names
+    create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
+    r1 = asyncio.run(create.execute(TeamCreateParams(team_name="coordbug1")))
+    assert not r1.is_error
+    assert agent.coordinator_mode is True
+    restricted_names = {t.name for t in agent.registry.list_tools()}
+    assert "WriteFile" not in restricted_names
 
-        r2 = asyncio.run(create.execute(TeamCreateParams(team_name="coordbug2")))
-        assert not r2.is_error
-        assert len(tm.list_teams()) == 2
+    r2 = asyncio.run(create.execute(TeamCreateParams(team_name="coordbug2")))
+    assert not r2.is_error
+    assert len(tm.list_teams()) == 2
 
-        delete = TeamDeleteTool(tm, agent)
-        r3 = asyncio.run(delete.execute(TeamDeleteParams(team_name="coordbug1")))
-        assert not r3.is_error
-        assert len(tm.list_teams()) == 1
+    delete = TeamDeleteTool(tm, agent)
+    r3 = asyncio.run(delete.execute(TeamDeleteParams(team_name="coordbug1")))
+    assert not r3.is_error
+    assert len(tm.list_teams()) == 1
 
-        names_after = {t.name for t in agent.registry.list_tools()}
-        assert agent.coordinator_mode is True
-        assert "WriteFile" not in names_after
-    finally:
-        cleanup("coordbug1", "coordbug2")
+    names_after = {t.name for t in agent.registry.list_tools()}
+    assert agent.coordinator_mode is True
+    assert "WriteFile" not in names_after
 
 
-def test_second_team_create_does_not_corrupt_full_registry_snapshot():
-    cleanup("coordbug3", "coordbug4")
-    try:
-        tm = TeamManager()
-        full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
-        agent = FakeAgent(full_registry)
+def test_second_team_create_does_not_corrupt_full_registry_snapshot(monkeypatch, tmp_path):
+    _isolate_team_storage(monkeypatch, tmp_path)
+    tm = TeamManager()
+    full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
+    agent = FakeAgent(full_registry)
 
-        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
-        asyncio.run(create.execute(TeamCreateParams(team_name="coordbug3")))
-        asyncio.run(create.execute(TeamCreateParams(team_name="coordbug4")))
+    create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
+    asyncio.run(create.execute(TeamCreateParams(team_name="coordbug3")))
+    asyncio.run(create.execute(TeamCreateParams(team_name="coordbug4")))
 
-        snapshot_names = {t.name for t in agent._full_registry.list_tools()}
-        assert "WriteFile" in snapshot_names
+    snapshot_names = {t.name for t in agent._full_registry.list_tools()}
+    assert "WriteFile" in snapshot_names
 
-        delete = TeamDeleteTool(tm, agent)
-        asyncio.run(delete.execute(TeamDeleteParams(team_name="coordbug3")))
-        asyncio.run(delete.execute(TeamDeleteParams(team_name="coordbug4")))
+    delete = TeamDeleteTool(tm, agent)
+    asyncio.run(delete.execute(TeamDeleteParams(team_name="coordbug3")))
+    asyncio.run(delete.execute(TeamDeleteParams(team_name="coordbug4")))
 
-        final_names = {t.name for t in agent.registry.list_tools()}
-        assert "WriteFile" in final_names
-    finally:
-        cleanup("coordbug3", "coordbug4")
+    final_names = {t.name for t in agent.registry.list_tools()}
+    assert "WriteFile" in final_names

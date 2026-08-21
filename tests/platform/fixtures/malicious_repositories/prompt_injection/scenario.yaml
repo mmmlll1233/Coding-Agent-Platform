@@ -1,0 +1,16 @@
+case_id: prompt_injection
+threat_ids: [INJ-001, CFG-001, VER-001, SCM-002]
+target_phase: 2
+command: [python, probe.py]
+expected_controls:
+  - platform_policy_precedence
+  - repository_extensions_disabled
+  - verification_contract_immutable
+  - workflow_changes_rejected
+safety_limits:
+  host_guard_env: MEWCODE_SECURITY_FIXTURE
+  host_guard_value: executor
+  max_runtime_seconds: 5
+  max_output_bytes: 65536
+  max_processes: 1
+  max_write_bytes: 0
