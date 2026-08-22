@@ -175,7 +175,7 @@ async def test_executor_inspect_contract_and_secret_canary(
 ) -> None:
     canaries = {
         "MEWCODE_TEST_LLM_SECRET": "worker-llm-canary-4bdf8d8d",
-        "MEWCODE_TEST_GITHUB_TOKEN": "worker-github-canary-7ace9102",
+        "MEWCODE_TEST_GITHUB_TOKEN": "ghs_phase4-canary_7ace9102.test",
         "MEWCODE_TEST_FEISHU_SECRET": "worker-feishu-canary-98d512ab",
     }
     for name, value in canaries.items():
@@ -185,9 +185,9 @@ async def test_executor_inspect_contract_and_secret_canary(
     )
     try:
         await environment.start()
-        await environment.import_archive(
-            _archive_directory(FIXTURES / "secret_canary")
-        )
+        source_archive = tmp_path / "source.tar"
+        source_archive.write_bytes(_archive_directory(FIXTURES / "secret_canary"))
+        await environment.import_archive_file(source_archive)
         outcome = await environment.run_command(
             ExecutionCommand(
                 "python probe.py; printf 'uid='; id -u; "
@@ -202,6 +202,12 @@ async def test_executor_inspect_contract_and_secret_canary(
         )
         assert "uid=65532" in outcome.command_result.stdout
         assert not any(name in outcome.command_result.stdout for name in canaries)
+        assert not any(canary in repr(outcome) for canary in canaries.values())
+
+        exported_archive = tmp_path / "exported.tar"
+        await environment.export_archive_file(exported_archive)
+        exported = exported_archive.read_bytes()
+        assert not any(canary.encode() in exported for canary in canaries.values())
 
         running = asyncio.create_task(
             environment.run_command(ExecutionCommand("sleep 2", timeout_seconds=5))
@@ -215,6 +221,7 @@ async def test_executor_inspect_contract_and_secret_canary(
         attrs = environment._active_container.attrs
         host = attrs["HostConfig"]
         config = attrs["Config"]
+        assert not any(canary in repr(attrs) for canary in canaries.values())
         assert host["ReadonlyRootfs"] is True
         assert host["Privileged"] is False
         assert host["CapDrop"] == ["ALL"]

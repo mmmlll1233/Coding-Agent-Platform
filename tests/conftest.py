@@ -107,6 +107,9 @@ def isolate_user_home_and_network(
         request.node.get_closest_marker("executor_security")
         or request.node.get_closest_marker("resource_exhaustion")
     )
+    live_github_test = bool(
+        request.node.get_closest_marker("platform_github_live")
+    )
 
     def isolated_expanduser(path: Path) -> Path:
         raw = str(path).replace("\\", "/")
@@ -117,6 +120,8 @@ def isolate_user_home_and_network(
         return original_expanduser(path)
 
     def guarded_connect(sock, address):
+        if live_github_test:
+            return original_connect(sock, address)
         if docker_test and isinstance(address, str) and address == "/var/run/docker.sock":
             return original_connect(sock, address)
         host = address[0] if isinstance(address, tuple) and address else ""
@@ -125,6 +130,8 @@ def isolate_user_home_and_network(
         raise AssertionError("real network access is forbidden in the default test suite")
 
     def guarded_connect_ex(sock, address):
+        if live_github_test:
+            return original_connect_ex(sock, address)
         if docker_test and isinstance(address, str) and address == "/var/run/docker.sock":
             return original_connect_ex(sock, address)
         host = address[0] if isinstance(address, tuple) and address else ""

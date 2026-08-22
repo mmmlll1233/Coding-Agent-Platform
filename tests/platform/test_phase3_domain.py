@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 
+from mewcode.platform.api.schemas import RepositoryRequest
 from mewcode.platform.domain import (
     AttemptStatus,
     InvalidTransition,
@@ -29,7 +30,9 @@ def test_job_state_machine_requires_delivery_evidence() -> None:
     ensure_job_transition(
         JobStatus.RUNNING,
         JobStatus.SUCCEEDED,
-        pr_url="https://github.example/pull/1",
+        pr_number=1,
+        pr_url="https://github.com/example/repository/pull/1",
+        head_branch="mewcode/00000000-0000-0000-0000-000000000001",
         head_sha="a" * 40,
         verification_succeeded=True,
     )
@@ -39,6 +42,16 @@ def test_job_state_machine_requires_delivery_evidence() -> None:
             JobStatus.SUCCEEDED,
             pr_url=" ",
             head_sha="not-a-sha",
+            verification_succeeded=True,
+        )
+    with pytest.raises(InvalidTransition):
+        ensure_job_transition(
+            JobStatus.RUNNING,
+            JobStatus.SUCCEEDED,
+            pr_number=2,
+            pr_url="https://github.com/example/repository/pull/1",
+            head_branch="mewcode/00000000-0000-0000-0000-000000000001",
+            head_sha="a" * 40,
             verification_succeeded=True,
         )
 
@@ -55,6 +68,17 @@ def test_repository_target_requires_immutable_object_id() -> None:
     assert target.base_sha == "a" * 40
     with pytest.raises(ValueError, match="immutable"):
         RepositoryTarget(1, "company", "repo", "main", "main")
+
+
+@pytest.mark.parametrize("base_ref", ["foo//bar", "foo/.hidden/bar", "foo.lock/bar", "@"])
+def test_repository_request_rejects_invalid_git_branch_names(base_ref: str) -> None:
+    with pytest.raises(ValueError, match="safe Git reference"):
+        RepositoryRequest(
+            installation_id=1,
+            owner="company",
+            name="repo",
+            base_ref=base_ref,
+        )
 
 
 def test_platform_settings_use_only_explicit_environment() -> None:

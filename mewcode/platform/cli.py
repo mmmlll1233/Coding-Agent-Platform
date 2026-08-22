@@ -17,7 +17,10 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
 from mewcode.platform.api import PlatformComponents, create_app
-from mewcode.platform.execution import SensitiveValueRedactor
+from mewcode.platform.execution import (
+    SensitiveValueRedactor,
+    shared_platform_redactor,
+)
 from mewcode.platform.persistence import PlatformRepository, create_database
 from mewcode.platform.settings import PlatformSettings, PlatformSettingsError
 from mewcode.platform.workers import WorkerService
@@ -80,7 +83,18 @@ def _secret_redactor(settings: PlatformSettings) -> SensitiveValueRedactor:
             and upper.endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD"))
         ):
             secrets.append(value)
-    return SensitiveValueRedactor(tuple(secrets))
+    if settings.github_private_key_file:
+        try:
+            secrets.append(
+                Path(settings.github_private_key_file).read_text(
+                    encoding="utf-8"
+                )
+            )
+        except OSError:
+            pass
+    redactor = shared_platform_redactor()
+    redactor.add(*secrets)
+    return redactor
 
 
 async def _create_key(settings: PlatformSettings, tenant: str, requester: str) -> int:

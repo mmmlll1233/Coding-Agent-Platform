@@ -19,7 +19,7 @@ from .models import (
     WorkspaceReadResult,
     WorkspaceWriteResult,
 )
-from .redaction import SensitiveValueRedactor
+from .redaction import SensitiveValueRedactor, shared_platform_redactor
 from .path_policy import WorkspacePathSandbox
 from .tools import create_platform_registry
 
@@ -38,6 +38,7 @@ __all__ = [
     "InMemoryWorkspaceAccess",
     "RuntimeEnvironmentInfo",
     "SensitiveValueRedactor",
+    "shared_platform_redactor",
     "WorkspaceAccess",
     "WorkspaceConflictError",
     "WorkspacePathError",

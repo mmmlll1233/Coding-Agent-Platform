@@ -839,7 +839,9 @@ class PlatformRepository:
                     ensure_job_transition(
                         JobStatus(job.status),
                         JobStatus.SUCCEEDED,
+                        pr_number=outcome.pr_number,
                         pr_url=outcome.pr_url,
+                        head_branch=outcome.head_branch,
                         head_sha=outcome.head_sha,
                         verification_succeeded=outcome.verification_succeeded,
                     )
@@ -865,7 +867,9 @@ class PlatformRepository:
                 )
                 attempt.status = AttemptStatus.COMPLETED.value
                 job.status = JobStatus.SUCCEEDED.value
+                job.pr_number = outcome.pr_number
                 job.pr_url = outcome.pr_url
+                job.head_branch = outcome.head_branch
                 job.head_sha = outcome.head_sha
                 job.verification_succeeded = outcome.verification_succeeded
                 job.finished_at = now
@@ -917,6 +921,11 @@ class PlatformRepository:
                     "status": job.status,
                     "error_code": outcome.error_code,
                     "error_message": outcome.error_message,
+                    "pr_number": outcome.pr_number,
+                    "pr_url": outcome.pr_url,
+                    "head_branch": outcome.head_branch,
+                    "head_sha": outcome.head_sha,
+                    "verification_succeeded": outcome.verification_succeeded,
                 },
             )
 

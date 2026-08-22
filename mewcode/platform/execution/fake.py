@@ -7,6 +7,7 @@ import re
 import tarfile
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
+from pathlib import Path
 
 from mewcode.tools.base import CommandExecutionResult
 
@@ -205,6 +206,13 @@ class FakeExecutionEnvironment:
                 info.mode = 0o640
                 tar.addfile(info, io.BytesIO(data))
         return output.getvalue()
+
+    async def import_archive_file(self, archive_path: Path) -> None:
+        await self.import_archive(archive_path.read_bytes())
+
+    async def export_archive_file(self, archive_path: Path) -> None:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_bytes(await self.export_archive())
 
     async def aclose(self) -> None:
         if self.state == ExecutionState.CLOSED:

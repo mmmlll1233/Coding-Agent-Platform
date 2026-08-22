@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from mewcode.platform.api import PlatformComponents, create_app
 from mewcode.platform.cli import _alembic_config
@@ -107,6 +108,60 @@ async def _create(
         work_request=_work(key),
         execution_contract=_execution(),
     )
+
+
+async def _migration_sql(settings: PlatformSettings, *statements: str) -> None:
+    database = create_database(settings)
+    try:
+        async with database.engine.begin() as connection:
+            for statement in statements:
+                await connection.execute(text(statement))
+    finally:
+        await database.aclose()
+
+
+def test_phase4_migration_fails_closed_on_incomplete_historical_success(
+    postgres_settings: PlatformSettings,
+) -> None:
+    config = _alembic_config(postgres_settings)
+    tenant_id = "00000000-0000-0000-0000-000000000401"
+    requester_id = "00000000-0000-0000-0000-000000000402"
+    job_id = "00000000-0000-0000-0000-000000000403"
+    command.downgrade(config, "0001_phase3_control_plane")
+    asyncio.run(
+        _migration_sql(
+            postgres_settings,
+            f"INSERT INTO tenants (id, name) VALUES ('{tenant_id}', 'phase4-migration')",
+            f"INSERT INTO requesters (id, tenant_id, name) "
+            f"VALUES ('{requester_id}', '{tenant_id}', 'phase4-migration')",
+            f"""
+            INSERT INTO jobs (
+              id, tenant_id, requester_id, idempotency_key, request_hash,
+              status, installation_id, repo_owner, repo_name, base_ref, base_sha,
+              work_request, execution_contract, pr_url, head_sha,
+              verification_succeeded
+            ) VALUES (
+              '{job_id}', '{tenant_id}', '{requester_id}', 'phase4-migration',
+              '{'4' * 64}', 'SUCCEEDED', 7, 'Acme', 'Repo', 'main',
+              '{'a' * 40}', '{{}}'::jsonb, '{{}}'::jsonb,
+              'https://github.com/Acme/Repo/pull/4', '{'b' * 40}', true
+            )
+            """,
+        )
+    )
+    try:
+        with pytest.raises(Exception, match="incomplete successful Delivery"):
+            command.upgrade(config, "head")
+    finally:
+        asyncio.run(
+            _migration_sql(
+                postgres_settings,
+                f"DELETE FROM jobs WHERE id = '{job_id}'",
+                f"DELETE FROM requesters WHERE id = '{requester_id}'",
+                f"DELETE FROM tenants WHERE id = '{tenant_id}'",
+            )
+        )
+        command.upgrade(config, "head")
 
 
 @pytest.mark.asyncio
@@ -317,6 +372,56 @@ async def test_completed_processor_cannot_create_unverified_success(database) ->
     assert failed.status == JobStatus.FAILED.value
     assert failed.error_code == "INCOMPLETE_DELIVERY"
     assert failed.pr_url is None
+
+
+@pytest.mark.asyncio
+async def test_phase4_delivery_evidence_is_persisted_atomically(database) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "phase4-delivery")
+    job, _ = await _create(repository, principal, "phase4-delivery")
+    claimed = await repository.claim_attempt(
+        worker_id="worker-phase4", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert claimed is not None
+    branch = f"mewcode/{job.id}"
+    await repository.finish_attempt(
+        attempt_id=claimed.lease.attempt_id,
+        worker_id=claimed.lease.worker_id,
+        fencing_token=claimed.lease.fencing_token,
+        outcome=AttemptOutcome(
+            status=AttemptOutcomeStatus.COMPLETED,
+            pr_number=17,
+            pr_url="https://github.com/example/repository/pull/17",
+            head_branch=branch,
+            head_sha="e" * 40,
+            verification_succeeded=True,
+        ),
+    )
+    completed = await repository.get_job(principal=principal, job_id=job.id)
+    assert completed.status == JobStatus.SUCCEEDED.value
+    assert completed.pr_number == 17
+    assert completed.head_branch == branch
+    events = await repository.list_events(
+        principal=principal, job_id=job.id, after=0, limit=100
+    )
+    succeeded = next(event for event in events if event.event_type == "job_succeeded")
+    assert succeeded.payload["pr_number"] == 17
+    assert succeeded.payload["head_branch"] == branch
+    assert succeeded.payload["verification_succeeded"] is True
+    invalid_delivery_updates = (
+        {"pr_url": None},
+        {"pr_number": 18},
+        {"pr_url": "https://example.com/example/repository/pull/17"},
+        {"head_branch": "mewcode/not-a-job-id"},
+        {"head_sha": "not-a-sha"},
+        {"verification_succeeded": False},
+    )
+    for invalid in invalid_delivery_updates:
+        with pytest.raises(IntegrityError):
+            async with database.sessions.begin() as session:
+                await session.execute(
+                    update(JobRow).where(JobRow.id == job.id).values(**invalid)
+                )
 
 
 @dataclass

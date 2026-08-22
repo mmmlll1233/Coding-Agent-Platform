@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .models import (
@@ -70,5 +71,9 @@ class ExecutionEnvironment(Protocol):
     async def import_archive(self, archive: bytes) -> None: ...
 
     async def export_archive(self) -> bytes: ...
+
+    async def import_archive_file(self, archive_path: Path) -> None: ...
+
+    async def export_archive_file(self, archive_path: Path) -> None: ...
 
     async def aclose(self) -> None: ...

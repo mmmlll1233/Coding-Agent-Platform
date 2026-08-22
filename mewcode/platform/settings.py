@@ -38,6 +38,12 @@ class PlatformSettings:
     worker_id: str = ""
     repository_resolver_factory: str = ""
     attempt_processor_factory: str = ""
+    github_app_client_id: str = ""
+    github_private_key_file: str = ""
+    github_timeout_seconds: int = 30
+    max_delivery_files: int = 200
+    max_delivery_bytes: int = 20 * 1024 * 1024
+    max_delivery_file_bytes: int = 5 * 1024 * 1024
     log_level: str = "INFO"
 
     @classmethod
@@ -90,6 +96,24 @@ class PlatformSettings:
             attempt_processor_factory=env.get(
                 "MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY", ""
             ).strip(),
+            github_app_client_id=env.get(
+                "MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID", ""
+            ).strip(),
+            github_private_key_file=env.get(
+                "MEWCODE_PLATFORM_GITHUB_PRIVATE_KEY_FILE", ""
+            ).strip(),
+            github_timeout_seconds=_positive_int(
+                env, "MEWCODE_PLATFORM_GITHUB_TIMEOUT_SECONDS", 30
+            ),
+            max_delivery_files=_positive_int(
+                env, "MEWCODE_PLATFORM_MAX_DELIVERY_FILES", 200
+            ),
+            max_delivery_bytes=_positive_int(
+                env, "MEWCODE_PLATFORM_MAX_DELIVERY_BYTES", 20 * 1024 * 1024
+            ),
+            max_delivery_file_bytes=_positive_int(
+                env, "MEWCODE_PLATFORM_MAX_DELIVERY_FILE_BYTES", 5 * 1024 * 1024
+            ),
             log_level=env.get("MEWCODE_PLATFORM_LOG_LEVEL", "INFO").upper(),
         )
 

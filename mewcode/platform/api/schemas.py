@@ -26,9 +26,22 @@ class RepositoryRequest(StrictModel):
     @field_validator("base_ref")
     @classmethod
     def safe_ref(cls, value: str) -> str:
+        parts = value.split("/")
         if (
             value.startswith("-")
+            or value == "@"
             or ".." in value
+            or "@{" in value
+            or value.startswith(("/", "."))
+            or value.endswith(("/", ".", ".lock"))
+            or any(
+                not part
+                or part.startswith(".")
+                or part.endswith((".", ".lock"))
+                for part in parts
+            )
+            or any(char in value for char in "~^:?*[\\")
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
             or any(char.isspace() for char in value)
         ):
             raise ValueError("base_ref is not a safe Git reference")
@@ -87,7 +100,7 @@ class CreateJobRequest(StrictModel):
             r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----",
             r"https?://[^/\s:@]+:[^@\s]+@",
             r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
-            r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
+            r"\bgh[pousr]_[A-Za-z0-9_.-]{20,}\b",
             r"\bsk-ant-[A-Za-z0-9_-]{16,}\b",
             r"\bsk-[A-Za-z0-9_-]{20,}\b",
             r"\bxox[baprs]-[A-Za-z0-9-]{16,}\b",

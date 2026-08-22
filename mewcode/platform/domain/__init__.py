@@ -4,15 +4,20 @@ from .models import (
     AttemptOutcomeStatus,
     AttemptStage,
     AttemptStatus,
+    Delivery,
     JobStatus,
+    PreparedRepository,
     RepositoryTarget,
+    VerifiedDeliveryRequest,
 )
 from .ports import (
     AttemptControls,
     AttemptProcessor,
     AttemptProcessorFactory,
     RepositoryTargetResolver,
+    RepositoryTargetRejected,
     RepositoryTargetUnavailable,
+    ScmAdapter,
 )
 from .state import InvalidTransition, ensure_attempt_transition, ensure_job_transition
 
@@ -25,11 +30,16 @@ __all__ = [
     "AttemptProcessorFactory",
     "AttemptStage",
     "AttemptStatus",
+    "Delivery",
     "InvalidTransition",
     "JobStatus",
+    "PreparedRepository",
     "RepositoryTarget",
     "RepositoryTargetResolver",
+    "RepositoryTargetRejected",
     "RepositoryTargetUnavailable",
+    "ScmAdapter",
+    "VerifiedDeliveryRequest",
     "ensure_attempt_transition",
     "ensure_job_transition",
 ]

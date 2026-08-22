@@ -3,15 +3,37 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from mewcode.platform.runtime import JobEventSink
 
-from .models import AttemptLease, AttemptOutcome, AttemptStage, RepositoryTarget
+from .models import (
+    AttemptLease,
+    AttemptOutcome,
+    AttemptStage,
+    Delivery,
+    PreparedRepository,
+    RepositoryTarget,
+    VerifiedDeliveryRequest,
+)
 
 
 class RepositoryTargetUnavailable(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "REPOSITORY_RESOLVER_UNAVAILABLE",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class RepositoryTargetRejected(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class RepositoryTargetResolver(Protocol):
@@ -45,3 +67,15 @@ class AttemptProcessor(Protocol):
 
 class AttemptProcessorFactory(Protocol):
     def create(self, lease: AttemptLease) -> AttemptProcessor: ...
+
+
+class ScmAdapter(Protocol):
+    async def prepare(
+        self, target: RepositoryTarget, trusted_state_dir: Path
+    ) -> PreparedRepository: ...
+
+    async def publish_verified(
+        self, request: VerifiedDeliveryRequest
+    ) -> Delivery: ...
+
+    async def aclose(self) -> None: ...

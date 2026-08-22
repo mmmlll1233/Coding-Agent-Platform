@@ -69,8 +69,12 @@ services:
       MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/api_db_password
       MEWCODE_PLATFORM_HOST: 0.0.0.0
       MEWCODE_PLATFORM_PORT: 8080
+      MEWCODE_PLATFORM_REPOSITORY_RESOLVER_FACTORY: mewcode.platform.scm:create_repository_resolver
+      MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID: ${MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID:-}
+      MEWCODE_PLATFORM_GITHUB_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
     secrets:
       - api_db_password
+      - github_app_private_key
     ports:
       - 127.0.0.1:8080:8080
     depends_on:
@@ -100,6 +104,8 @@ secrets:
     file: ${MEWCODE_API_DB_PASSWORD_FILE:-.mewcode/secrets/api_db_password}
   worker_db_password:
     file: ${MEWCODE_WORKER_DB_PASSWORD_FILE:-.mewcode/secrets/worker_db_password}
+  github_app_private_key:
+    file: ${MEWCODE_GITHUB_APP_PRIVATE_KEY_FILE:-.mewcode/secrets/github_app_private_key.pem}
 
 volumes:
   platform_postgres_data:

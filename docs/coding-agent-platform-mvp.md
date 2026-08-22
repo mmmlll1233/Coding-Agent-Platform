@@ -333,8 +333,14 @@ Repository Target Resolver 与 Attempt Processor 通过 port 注入；未配置�
 
 ### Phase 4：GitHub App 与 Draft PR（4～6 天）
 
-- installation 校验、固定 SHA、隔离 checkout、bot commit、push和幂等 PR创建。
+- installation 校验、固定 SHA、安全归档、bot commit、创建 ref和幂等 PR创建。
 - 禁止 force push、workflow 修改、submodule和LFS。
+
+交付状态（2026-08-22）：已完成。GitHub.com App Resolver、短期且单仓库权限收窄的
+installation token、无 `.git` 归档、可信 manifest、Git Data API 发布、确定性分支与
+幂等 Draft PR 已实现；完整 Delivery 证据已接入 PostgreSQL 终态。生产 Worker 仍等
+Phase 5 Verification 后启用。交付与运行说明见
+`docs/platform/phase4-github-app-draft-pr.md`，安全取舍见 ADR 0011。
 
 验收：在专用测试仓库中完成端到端 Draft PR；重复发布不产生第二个分支或 PR；Agent 容器内找不到 GitHub token。
 

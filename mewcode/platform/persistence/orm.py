@@ -177,7 +177,12 @@ class JobRow(Base):
         ),
         CheckConstraint(
             "status <> 'SUCCEEDED' OR "
-            "(pr_url IS NOT NULL AND length(btrim(pr_url)) > 0 AND "
+            "(pr_number IS NOT NULL AND pr_number > 0 AND "
+            "CASE WHEN pr_url IS NOT NULL AND "
+            "pr_url ~ '^https://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$' "
+            "THEN split_part(pr_url, '/', 7)::bigint = pr_number ELSE false END AND "
+            "head_branch IS NOT NULL AND "
+            "head_branch ~ '^mewcode/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND "
             "head_sha IS NOT NULL AND "
             "head_sha ~ '^[0-9a-f]{40}([0-9a-f]{24})?$' AND "
             "verification_succeeded)",

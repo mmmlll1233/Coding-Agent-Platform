@@ -28,6 +28,10 @@ _Avoid_: Job volume, shared workspace
 The GitHub repository and immutable base revision to which a Work Request applies.
 _Avoid_: Repo info, source address
 
+**Prepared Repository**:
+A trusted, credential-free snapshot of a Repository Target together with the manifest needed to prove later Workspace changes.
+_Avoid_: Checkout, clone, working copy
+
 **Requester**:
 An authenticated internal actor that submits a Work Request, supplies its Verification Contract, and answers requests for clarification.
 _Avoid_: User, client, caller

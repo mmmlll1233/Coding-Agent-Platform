@@ -8,6 +8,10 @@ import httpx
 import pytest
 
 from mewcode.platform.api import PlatformComponents, create_app
+from mewcode.platform.domain import (
+    RepositoryTargetRejected,
+    RepositoryTargetUnavailable,
+)
 from mewcode.platform.persistence import ApiKeyPrincipal, StoredEvent
 from mewcode.platform.settings import PlatformSettings
 
@@ -119,6 +123,73 @@ async def test_validation_errors_do_not_echo_request_values() -> None:
 
     assert response.status_code == 422
     assert secret not in response.text
+
+
+@pytest.mark.asyncio
+async def test_phase4_repository_rejection_preserves_stable_error_code() -> None:
+    class Resolver:
+        async def resolve(self, **kwargs):
+            raise RepositoryTargetRejected(
+                "GITHUB_INSTALLATION_SUSPENDED",
+                "GitHub App installation is suspended",
+            )
+
+    settings = PlatformSettings.from_env(
+        {"MEWCODE_PLATFORM_DATABASE_URL": "postgresql://db/platform"}
+    )
+    app = create_app(
+        components=PlatformComponents(
+            settings=settings,
+            database=_Database(),  # type: ignore[arg-type]
+            repository=_Repository(),  # type: ignore[arg-type]
+            resolver=Resolver(),  # type: ignore[arg-type]
+        )
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/jobs",
+            json=_body(),
+            headers={
+                "Authorization": "Bearer test-token",
+                "Idempotency-Key": "phase4-rejected",
+            },
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "GITHUB_INSTALLATION_SUSPENDED"
+
+
+@pytest.mark.asyncio
+async def test_phase4_github_unavailable_maps_to_stable_503() -> None:
+    class Resolver:
+        async def resolve(self, **kwargs):
+            raise RepositoryTargetUnavailable(
+                "GitHub is temporarily unavailable", code="GITHUB_UNAVAILABLE"
+            )
+
+    settings = PlatformSettings.from_env(
+        {"MEWCODE_PLATFORM_DATABASE_URL": "postgresql://db/platform"}
+    )
+    app = create_app(
+        components=PlatformComponents(
+            settings=settings,
+            database=_Database(),  # type: ignore[arg-type]
+            repository=_Repository(),  # type: ignore[arg-type]
+            resolver=Resolver(),  # type: ignore[arg-type]
+        )
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/jobs",
+            json=_body(),
+            headers={
+                "Authorization": "Bearer test-token",
+                "Idempotency-Key": "phase4-unavailable",
+            },
+        )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "GITHUB_UNAVAILABLE"
 
 
 class _SseRepository(_Repository):

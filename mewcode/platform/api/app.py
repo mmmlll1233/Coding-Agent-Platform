@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mewcode.platform.domain import (
+    RepositoryTargetRejected,
     RepositoryTargetResolver,
     RepositoryTargetUnavailable,
 )
@@ -143,11 +144,14 @@ def create_app(
         try:
             yield
         finally:
+            close_resolver = getattr(components.resolver, "aclose", None)
+            if close_resolver is not None:
+                await close_resolver()
             await components.database.aclose()
 
     app = FastAPI(
         title="MewCode Coding Platform",
-        version="1.0.0-phase3",
+        version="1.0.0-phase4",
         lifespan=lifespan,
     )
     app.state.components = components
@@ -314,15 +318,15 @@ def create_app(
                 base_ref=repository.base_ref,
             )
         except RepositoryTargetUnavailable as error:
-            raise ApiError(
-                503, "REPOSITORY_RESOLVER_UNAVAILABLE", str(error)
-            ) from error
+            raise ApiError(503, error.code, str(error)) from error
+        except RepositoryTargetRejected as error:
+            raise ApiError(422, error.code, str(error)) from error
         except ValueError as error:
             raise ApiError(422, "INVALID_REPOSITORY_TARGET", str(error)) from error
         if (
             target.installation_id != repository.installation_id
-            or target.owner != repository.owner
-            or target.name != repository.name
+            or target.owner.casefold() != repository.owner.casefold()
+            or target.name.casefold() != repository.name.casefold()
             or target.base_ref != repository.base_ref
         ):
             raise ApiError(

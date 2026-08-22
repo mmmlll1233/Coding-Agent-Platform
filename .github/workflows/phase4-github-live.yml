@@ -1,0 +1,74 @@
+name: Phase 4 GitHub live gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase4-github-live
+  cancel-in-progress: false
+
+jobs:
+  github-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: phase4-github-live
+    env:
+      MEWCODE_TEST_GITHUB_APP_CLIENT_ID: ${{ vars.MEWCODE_TEST_GITHUB_APP_CLIENT_ID }}
+      MEWCODE_TEST_GITHUB_INSTALLATION_ID: ${{ vars.MEWCODE_TEST_GITHUB_INSTALLATION_ID }}
+      MEWCODE_TEST_GITHUB_OWNER: ${{ vars.MEWCODE_TEST_GITHUB_OWNER }}
+      MEWCODE_TEST_GITHUB_REPOSITORY: ${{ vars.MEWCODE_TEST_GITHUB_REPOSITORY }}
+      MEWCODE_TEST_GITHUB_BASE_REF: ${{ vars.MEWCODE_TEST_GITHUB_BASE_REF }}
+      MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE: ${{ runner.temp }}/mewcode-phase4-app.pem
+      MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64: ${{ secrets.MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64 }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Build immutable Executor image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f docker/executor/Dockerfile -t mewcode-executor:phase4-live .
+          docker pull ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+          echo "MEWCODE_EXECUTOR_IMAGE=$(docker image inspect mewcode-executor:phase4-live --format '{{.Id}}')" >> "$GITHUB_ENV"
+          echo "MEWCODE_PROXY_IMAGE=sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c" >> "$GITHUB_ENV"
+
+      - name: Materialize protected GitHub App key
+        shell: bash
+        run: printf '%s' "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64" | base64 --decode > "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE"
+
+      - name: Run Phase 4 live gate
+        run: >-
+          uv run pytest -q --strict-markers --enforce-platform-outcomes
+          -m platform_github_live
+
+      - name: Remove private key
+        if: always()
+        shell: bash
+        run: rm -f "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE"
+
+      - name: Assert no Attempt Docker resources remain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(docker ps -aq --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker volume ls -q --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker network ls -q --filter label=com.mewcode.attempt_id)"

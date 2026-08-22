@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import tarfile
 from types import SimpleNamespace
 
 import pytest
@@ -75,6 +77,27 @@ def test_attempt_state_directories_are_isolated_by_identity(tmp_path) -> None:
     assert first.trusted_state_dir != retry.trusted_state_dir
     assert first.trusted_state_dir.parent == tmp_path.resolve() / "state" / "attempts"
     assert retry.trusted_state_dir.parent == first.trusted_state_dir.parent
+
+
+@pytest.mark.asyncio
+async def test_execution_environment_file_archive_api_preserves_compatibility(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source.tar"
+    with tarfile.open(source, mode="w") as archive:
+        content = b"phase4\n"
+        info = tarfile.TarInfo("hello.txt")
+        info.size = len(content)
+        archive.addfile(info, io.BytesIO(content))
+    environment = FakeExecutionEnvironment(_spec(tmp_path))
+    await environment.start()
+    await environment.import_archive_file(source)
+    assert (await environment.workspace.read_file("hello.txt")).content == "phase4\n"
+    exported = tmp_path / "exported.tar"
+    await environment.export_archive_file(exported)
+    assert exported.is_file()
+    with tarfile.open(exported, mode="r:*") as archive:
+        assert archive.extractfile("hello.txt").read() == b"phase4\n"  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio

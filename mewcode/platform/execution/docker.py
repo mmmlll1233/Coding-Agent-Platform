@@ -9,7 +9,7 @@ import logging
 import posixpath
 import tarfile
 import time
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mewcode.tools.base import CommandExecutionResult
@@ -147,6 +147,61 @@ def _split_workspace_archive(archive_bytes: bytes, max_bytes: int) -> tuple[byte
     return main.getvalue(), metadata.getvalue()
 
 
+def _split_workspace_archive_file(
+    source_path: Path, main_path: Path, metadata_path: Path, max_bytes: int
+) -> None:
+    total = 0
+    with tarfile.open(source_path, mode="r:*") as source, tarfile.open(
+        main_path, mode="w"
+    ) as main_tar, tarfile.open(metadata_path, mode="w") as metadata_tar:
+        for member in source.getmembers():
+            normalized = _safe_archive_member(member.name)
+            if normalized == ".":
+                continue
+            if normalized == ".git" or normalized.startswith(".git/"):
+                continue
+            if normalized == ".mewcode" or normalized.startswith(".mewcode/"):
+                continue
+            if normalized == ".env":
+                continue
+            if member.isdev() or member.isfifo() or member.islnk():
+                raise ExecutionEnvironmentError(
+                    f"Unsupported archive member: {member.name}"
+                )
+            if member.issym():
+                target = PurePosixPath(member.linkname.replace("\\", "/"))
+                if target.is_absolute():
+                    raise ExecutionEnvironmentError(
+                        f"Absolute symlink is forbidden: {member.name}"
+                    )
+                resolved = PurePosixPath(normalized).parent.joinpath(target)
+                depth = 0
+                for part in resolved.parts:
+                    depth += -1 if part == ".." else 0 if part == "." else 1
+                    if depth < 0:
+                        raise ExecutionEnvironmentError(
+                            f"Escaping symlink is forbidden: {member.name}"
+                        )
+            total += max(0, member.size)
+            if total > max_bytes:
+                raise ExecutionEnvironmentError(
+                    "Workspace archive exceeds configured capacity"
+                )
+            extracted = source.extractfile(member) if member.isfile() else None
+            cloned = copy.copy(member)
+            cloned.uid = 65532
+            cloned.gid = 65532
+            if normalized == ".github" or normalized.startswith(".github/"):
+                relative = normalized.removeprefix(".github").lstrip("/") or "."
+                if relative == ".":
+                    continue
+                cloned.name = relative
+                metadata_tar.addfile(cloned, extracted)
+            else:
+                cloned.name = normalized
+                main_tar.addfile(cloned, extracted)
+
+
 def _rebase_export_archive(archive_bytes: bytes) -> bytes:
     """Remove Docker's top-level ``workspace/`` archive wrapper."""
     output = io.BytesIO()
@@ -172,6 +227,35 @@ def _rebase_export_archive(archive_bytes: bytes) -> bytes:
                     content = io.BytesIO(data)
                 target.addfile(cloned, content)
     return output.getvalue()
+
+
+def _rebase_export_archive_file(source_path: Path, destination_path: Path) -> None:
+    with tarfile.open(source_path, mode="r:*") as source, tarfile.open(
+        destination_path, mode="w"
+    ) as target:
+        for member in source.getmembers():
+            raw = member.name.replace("\\", "/").lstrip("./")
+            if raw == "workspace":
+                continue
+            if not raw.startswith("workspace/"):
+                raise ExecutionEnvironmentError(
+                    f"Unexpected Docker archive member: {member.name!r}"
+                )
+            normalized = _safe_archive_member(raw.removeprefix("workspace/"))
+            cloned = copy.copy(member)
+            cloned.name = normalized
+            content = (
+                source.extractfile(member)
+                if member.isfile() or member.islnk()
+                else None
+            )
+            if member.islnk():
+                data = content.read() if content is not None else b""
+                cloned.type = tarfile.REGTYPE
+                cloned.linkname = ""
+                cloned.size = len(data)
+                content = io.BytesIO(data)
+            target.addfile(cloned, content)
 
 
 class DockerWorkspaceAccess:
@@ -361,7 +445,7 @@ class DockerExecutionEnvironment:
             )
         return network
 
-    def _seed_volume_sync(self, volume: Any, archive: bytes, target: str = "/data") -> None:
+    def _seed_volume_sync(self, volume: Any, archive: Any, target: str = "/data") -> None:
         container = self._docker().containers.create(
             self.spec.executor_image,
             command=["/bin/sh", "-lc", "sleep 30"],
@@ -890,6 +974,50 @@ visible_hostname mewcode-egress-proxy
             ) from exc
         self._workspace_imported = True
 
+    async def import_archive_file(self, archive_path: Path) -> None:
+        if self.state != ExecutionState.READY:
+            raise ExecutionEnvironmentError("ExecutionEnvironment is not ready")
+        if self._workspace_imported:
+            self.state = ExecutionState.BROKEN
+            raise ExecutionEnvironmentError(
+                "Attempt Workspace can be initialized only once"
+            )
+        main_path = self.spec.trusted_state_dir / "workspace-main.tar"
+        metadata_path = self.spec.trusted_state_dir / "workspace-metadata.tar"
+        try:
+            await asyncio.to_thread(
+                _split_workspace_archive_file,
+                Path(archive_path),
+                main_path,
+                metadata_path,
+                self.spec.limits.workspace_bytes,
+            )
+            assert self._workspace_volume is not None
+            assert self._metadata_volume is not None
+            with main_path.open("rb") as main, metadata_path.open("rb") as metadata:
+                await asyncio.to_thread(
+                    self._seed_volume_sync, self._workspace_volume, main
+                )
+                await asyncio.to_thread(
+                    self._seed_volume_sync, self._metadata_volume, metadata
+                )
+        except Exception as exc:
+            self.state = ExecutionState.BROKEN
+            if isinstance(exc, ExecutionEnvironmentError):
+                raise
+            message = str(exc)
+            if "no space left" in message.lower() or "quota" in message.lower():
+                raise ExecutionResourceLimitError(
+                    "Attempt Workspace file import exceeded its resource limit"
+                ) from exc
+            raise ExecutionEnvironmentError(
+                f"Attempt Workspace file import failed: {exc}"
+            ) from exc
+        finally:
+            main_path.unlink(missing_ok=True)
+            metadata_path.unlink(missing_ok=True)
+        self._workspace_imported = True
+
     def _export_archive_sync(self) -> bytes:
         container = self._docker().containers.create(
             self.spec.executor_image,
@@ -913,6 +1041,40 @@ visible_hostname mewcode-egress-proxy
         if self.state != ExecutionState.READY:
             raise ExecutionEnvironmentError("ExecutionEnvironment is not ready")
         return await asyncio.to_thread(self._export_archive_sync)
+
+    def _export_archive_file_sync(self, destination_path: Path) -> None:
+        raw_path = destination_path.with_suffix(destination_path.suffix + ".docker")
+        destination_path.unlink(missing_ok=True)
+        container = self._docker().containers.create(
+            self.spec.executor_image,
+            command=["/bin/sh", "-lc", "sleep 30"],
+            user="65532:65532",
+            network_mode="none",
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            volumes=self._mounts(),
+            labels=self._resource_labels("export"),
+        )
+        try:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            container.start()
+            stream, _ = container.get_archive("/workspace")
+            with raw_path.open("wb") as output:
+                for chunk in stream:
+                    output.write(chunk)
+            _rebase_export_archive_file(raw_path, destination_path)
+        except Exception:
+            destination_path.unlink(missing_ok=True)
+            raise
+        finally:
+            raw_path.unlink(missing_ok=True)
+            container.remove(force=True)
+
+    async def export_archive_file(self, archive_path: Path) -> None:
+        if self.state != ExecutionState.READY:
+            raise ExecutionEnvironmentError("ExecutionEnvironment is not ready")
+        await asyncio.to_thread(self._export_archive_file_sync, Path(archive_path))
 
     def _cleanup_sync(self) -> None:
         errors: list[str] = []

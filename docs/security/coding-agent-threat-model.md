@@ -2,7 +2,7 @@
 
 ## 1. 目的与范围
 
-本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App、Verification 发布链路和通知仍属于后续阶段。
+本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App 与幂等 Draft PR SCM 链路已在 Phase 4 实现，Verification 发布编排和通知仍属于后续阶段。
 
 MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、构建脚本、依赖代码、Agent 生成的命令和 Verification 命令全部视为不可信输入。内部单租户降低了身份和计费复杂度，但不降低仓库内容、供应链代码或提示注入的风险。
 
@@ -133,3 +133,25 @@ python -m pytest -q -m platform_postgres
 Requester 隔离和统一脱敏。`AVAIL-001` 的 Phase 3 部分已覆盖并发幂等提交、数据库
 全局单并发、Worker Lease、heartbeat、fencing、过期后一次自动恢复和迟到 Worker
 写入拒绝。测试使用 localhost PostgreSQL，不访问真实 LLM、GitHub 或飞书。
+
+## 12. Phase 4 验收记录
+
+`SCM-001` 已由无凭证 HTTP 契约、动态 `ghs_` canary redaction、无 `.git` Workspace
+归档和 Docker 凭证隔离覆盖。`SCM-002` 已由 gitlink/LFS/`.github` 拒绝、固定单父
+base SHA、只创建不更新 ref、Job ownership trailer 和 Draft PR marker 覆盖。
+`AVAIL-001` 的 Phase 4 部分覆盖 branch/PR 创建竞态、发布后崩溃对账及重复发布返回
+同一 Delivery。默认 CI 不访问 GitHub；真实专用仓库验收由受保护的
+`platform_github_live` 手动门禁执行并清理 Draft PR 与分支。
+
+2026-08-22 在 Windows、Python 3.13、PostgreSQL 16 与 Docker Desktop Linux Engine
+上执行：
+
+```text
+默认无凭证门禁：659 passed, 1 skipped, 19 deselected
+PostgreSQL 门禁：10 passed
+Docker Executor 安全门禁：6 passed
+```
+
+唯一 skip 仍是 Windows symlink capability；本地未提供受保护 GitHub App 凭证，因而
+没有执行真实仓库门禁。该门禁只能通过 `workflow_dispatch` 和
+`phase4-github-live` Environment 手动运行。
