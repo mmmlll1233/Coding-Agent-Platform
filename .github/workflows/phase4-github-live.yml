@@ -21,7 +21,6 @@ jobs:
       MEWCODE_TEST_GITHUB_OWNER: ${{ vars.MEWCODE_TEST_GITHUB_OWNER }}
       MEWCODE_TEST_GITHUB_REPOSITORY: ${{ vars.MEWCODE_TEST_GITHUB_REPOSITORY }}
       MEWCODE_TEST_GITHUB_BASE_REF: ${{ vars.MEWCODE_TEST_GITHUB_BASE_REF }}
-      MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE: ${{ runner.temp }}/mewcode-phase4-app.pem
       MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64: ${{ secrets.MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64 }}
 
     steps:
@@ -52,7 +51,12 @@ jobs:
 
       - name: Materialize protected GitHub App key
         shell: bash
-        run: printf '%s' "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64" | base64 --decode > "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE"
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/mewcode-phase4-app.pem"
+          printf '%s' "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64" | base64 --decode > "$key_file"
+          chmod 600 "$key_file"
+          echo "MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE=$key_file" >> "$GITHUB_ENV"
 
       - name: Run Phase 4 live gate
         run: >-
