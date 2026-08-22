@@ -2,7 +2,7 @@
 
 ## 1. 目的与范围
 
-本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API、GitHub App、Verification 发布链路和通知仍属于后续阶段。
+本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App、Verification 发布链路和通知仍属于后续阶段。
 
 MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、构建脚本、依赖代码、Agent 生成的命令和 Verification 命令全部视为不可信输入。内部单租户降低了身份和计费复杂度，但不降低仓库内容、供应链代码或提示注入的风险。
 
@@ -119,3 +119,17 @@ python -m pytest -q tests/platform/test_docker_execution.py -m resource_exhausti
 PID 限制。出网成功路径使用同一 Docker egress bridge 上的本地 HTTPS mock
 package endpoint；测试不依赖真实 PyPI。每个用例结束后按 Attempt labels 验证
 container、network 和 volume 在 10 秒内清零，未使用全局 Docker prune。
+
+## 11. Phase 3 验收记录
+
+2026-08-21 在 PostgreSQL 16、Python 3.13 上执行独立持久化门禁：
+
+```text
+python -m pytest -q -m platform_postgres
+8 passed
+```
+
+`EVT-001` 已覆盖 Job 全局 sequence、跨 Attempt 顺序、SSE 所依赖的持久化读取、
+Requester 隔离和统一脱敏。`AVAIL-001` 的 Phase 3 部分已覆盖并发幂等提交、数据库
+全局单并发、Worker Lease、heartbeat、fencing、过期后一次自动恢复和迟到 Worker
+写入拒绝。测试使用 localhost PostgreSQL，不访问真实 LLM、GitHub 或飞书。

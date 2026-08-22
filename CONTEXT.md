@@ -16,6 +16,10 @@ _Avoid_: Task, session, conversation
 One execution of a Job; a retried Job receives a new Attempt while retaining the same identity.
 _Avoid_: Run, retry task
 
+**Worker Lease**:
+The time-bounded right for one Worker to advance an Attempt; an expired lease cannot authorize later state changes.
+_Avoid_: Lock, ownership flag
+
 **Attempt Workspace**:
 The disposable isolated filesystem owned by exactly one Attempt; every retry receives a new one.
 _Avoid_: Job volume, shared workspace
@@ -45,5 +49,5 @@ A non-terminal Job condition in which MewCode cannot continue safely without cla
 _Avoid_: Failed, blocked
 
 **Failed**:
-A terminal Job outcome in which MewCode could not produce a verified Delivery.
+A stopped Job outcome in which MewCode could not produce a verified Delivery; automatic processing has ended, but the Requester may explicitly reopen the same Job with a new Attempt.
 _Avoid_: Needs Input, error

@@ -83,7 +83,7 @@ class JobRunner:
         event = JobEvent(
             job_id=request.job_id,
             attempt_id=request.attempt_id,
-            sequence=self._sequence,
+            attempt_sequence=self._sequence,
             timestamp=datetime.now(timezone.utc),
             event_type=event_type,
             payload=self._redact_value(payload or {}),

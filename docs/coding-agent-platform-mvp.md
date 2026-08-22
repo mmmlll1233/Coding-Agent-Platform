@@ -129,7 +129,7 @@ PREPARING
       {"name": "install", "command": "uv sync --frozen", "timeout_seconds": 600}
     ],
     "verification_commands": [
-      {"name": "tests", "command": "uv run pytest", "timeout_seconds": 1200}
+      {"name": "tests", "command": "uv run pytest", "timeout_seconds": 600}
     ]
   },
   "attachment_ids": []
@@ -318,6 +318,14 @@ ExecutionEnvironment；每个 Attempt 使用有界 tmpfs workspace、internal ne
 
 - ASGI API、API Key、Idempotency-Key、Job/Attempt/Event/Artifact/Outbox迁移。
 - PostgreSQL 队列、租约、heartbeat、恢复、SSE和 `/input`。
+
+交付状态（2026-08-21）：已完成。独立 FastAPI Control API、Requester API Key、
+Alembic/PostgreSQL schema、幂等 Job、Attempt 状态机、持久化 JobEvent/SSE、全局
+单并发领取、Worker Lease、fencing、heartbeat、取消和一次自动恢复均已实现。
+Repository Target Resolver 与 Attempt Processor 通过 port 注入；未配置时分别拒绝
+创建 Job 和启动 Worker，真实 GitHub/Agent 流程仍保留给后续阶段。Artifact/Outbox
+本阶段仅提供 schema 与 port。交付和运行说明见
+`docs/platform/phase3-control-api-postgres.md`。
 
 验收：API 重复提交只生成一个 Job；API/Worker 重启不丢任务；SSE 可断点续读；租约过期能安全重试。
 

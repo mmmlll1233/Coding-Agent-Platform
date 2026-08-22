@@ -24,10 +24,15 @@ class JobRunRequest:
 class JobEvent:
     job_id: str
     attempt_id: str
-    sequence: int
+    attempt_sequence: int
     timestamp: datetime
     event_type: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def sequence(self) -> int:
+        """Compatibility alias for the producer-local Attempt sequence."""
+        return self.attempt_sequence
 
 
 @dataclass(frozen=True)
@@ -62,4 +67,3 @@ class InMemoryJobEventSink:
 
     async def emit(self, event: JobEvent) -> None:
         self.events.append(event)
-

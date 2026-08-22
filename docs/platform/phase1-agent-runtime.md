@@ -17,8 +17,11 @@ Docker Executor、Verification、GitHub 发布或平台 Job 终态。
   `start()`/`aclose()`。
 - `JobRunner` 每个实例只执行一个 Attempt，返回 `JobResult`；
   `COMPLETED` 只允许 Worker 推进到后续 Verification 阶段。
-- `JobEventSink` 按 `job_id/attempt_id/sequence` 接收串行事件；sink 失败会令
+- `JobEventSink` 按 `job_id/attempt_id/attempt_sequence` 接收 Attempt 内串行事件；sink 失败会令
   Attempt 以 `EVENT_SINK_FAILED` 结束。
+
+Phase 3 持久化 sink 会另行分配 Job 范围内的全局 `sequence`，供分页和 SSE 续读；
+详见 `docs/platform/phase3-control-api-postgres.md`。
 
 `PLATFORM` profile 不读取用户或仓库 permissions、hooks、MCP、skills、memory、
 team 或 worktree 配置。平台策略位于 system prompt；显式传入的仓库指导以

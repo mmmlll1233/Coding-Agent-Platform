@@ -1,0 +1,105 @@
+name: mewcode-platform
+
+x-platform-service: &platform-service
+  build:
+    context: .
+    dockerfile: docker/platform/Dockerfile
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  postgres:
+    image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mewcode
+      POSTGRES_USER: mewcode_migrator
+      POSTGRES_PASSWORD_FILE: /run/secrets/migrator_db_password
+    secrets:
+      - migrator_db_password
+      - api_db_password
+      - worker_db_password
+    volumes:
+      - platform_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/00-create-runtime-roles.sh:/docker-entrypoint-initdb.d/00-create-runtime-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mewcode_migrator -d mewcode"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    <<: *platform-service
+    command: ["db", "upgrade"]
+    environment:
+      MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_migrator@postgres:5432/mewcode
+      MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/migrator_db_password
+    secrets:
+      - migrator_db_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  grant-runtime:
+    <<: *platform-service
+    command: ["db", "grant-runtime"]
+    environment:
+      MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_migrator@postgres:5432/mewcode
+      MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/migrator_db_password
+    secrets:
+      - migrator_db_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *platform-service
+    command: ["api"]
+    restart: unless-stopped
+    environment:
+      MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_api@postgres:5432/mewcode
+      MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/api_db_password
+      MEWCODE_PLATFORM_HOST: 0.0.0.0
+      MEWCODE_PLATFORM_PORT: 8080
+    secrets:
+      - api_db_password
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      grant-runtime:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *platform-service
+    profiles: ["worker"]
+    command: ["worker"]
+    restart: unless-stopped
+    environment:
+      MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_worker@postgres:5432/mewcode
+      MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password
+      MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY: ${MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY:-}
+      MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS: ${MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS:-1}
+    secrets:
+      - worker_db_password
+    depends_on:
+      grant-runtime:
+        condition: service_completed_successfully
+
+secrets:
+  migrator_db_password:
+    file: ${MEWCODE_MIGRATOR_DB_PASSWORD_FILE:-.mewcode/secrets/migrator_db_password}
+  api_db_password:
+    file: ${MEWCODE_API_DB_PASSWORD_FILE:-.mewcode/secrets/api_db_password}
+  worker_db_password:
+    file: ${MEWCODE_WORKER_DB_PASSWORD_FILE:-.mewcode/secrets/worker_db_password}
+
+volumes:
+  platform_postgres_data:

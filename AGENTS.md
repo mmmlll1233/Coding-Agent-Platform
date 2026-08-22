@@ -69,6 +69,7 @@ uv run pytest tests/test_hello_world.py::test_hello_world
 - `mewcode/worktree/`：基于 git worktree 的隔离执行环境。
 - `mewcode/teams/`：多 Agent 团队、协调者、邮箱和进度管理。
 - `mewcode/agents/`：子 Agent 加载、任务管理、trace、内置 agent prompt。
+- `mewcode/platform/`：Coding Platform 的领域模型、Control API、PostgreSQL 持久化、Docker ExecutionEnvironment、Runtime 与 Worker。
 - `mewcode/commands/`：斜杠命令注册、解析与处理器。
 - `mewcode/skills/`：Skill 加载、安装、解析与执行。
 - `mewcode/hooks/`：生命周期 hook 的配置、条件、执行器和事件模型。

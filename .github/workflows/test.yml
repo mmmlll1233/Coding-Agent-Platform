@@ -41,7 +41,61 @@ jobs:
       - name: Run default test gate
         run: >-
           uv run pytest -q --strict-markers --enforce-platform-outcomes
-          -m "not executor_security and not resource_exhaustion"
+          -m "not executor_security and not resource_exhaustion and not platform_postgres"
+
+      - name: Verify tests left the checkout clean
+        run: >-
+          uv run python -c "import subprocess, sys;
+          status = subprocess.check_output(
+          ['git', 'status', '--porcelain', '--untracked-files=all'], text=True);
+          print(status, end='');
+          sys.exit(1 if status.strip() else 0)"
+
+  phase3-postgres:
+    name: Ubuntu / Phase 3 PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+        env:
+          POSTGRES_DB: mewcode_test
+          POSTGRES_USER: mewcode_test
+          POSTGRES_PASSWORD: mewcode_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mewcode_test -d mewcode_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      MEWCODE_TEST_DATABASE_URL: postgresql+asyncpg://mewcode_test:mewcode_test_password@127.0.0.1:5432/mewcode_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run Phase 3 PostgreSQL gate
+        run: >-
+          uv run pytest -q --strict-markers --enforce-platform-outcomes
+          -m platform_postgres
 
       - name: Verify tests left the checkout clean
         run: >-
