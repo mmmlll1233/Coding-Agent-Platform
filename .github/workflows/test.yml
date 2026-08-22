@@ -41,6 +41,7 @@ jobs:
       - name: Run default test gate
         run: >-
           uv run pytest -q --strict-markers --enforce-platform-outcomes
+          --basetemp .mewcode/pytest-ci-${{ matrix.os }}-${{ matrix.python-version }}
           -m "not executor_security and not resource_exhaustion and not platform_postgres"
 
       - name: Verify tests left the checkout clean
@@ -138,7 +139,7 @@ jobs:
           docker pull ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
           echo "MEWCODE_EXECUTOR_IMAGE=$(docker image inspect mewcode-executor:ci --format '{{.Id}}')" >> "$GITHUB_ENV"
           echo "MEWCODE_MOCK_PACKAGE_IMAGE=$(docker image inspect mewcode-mock-package:ci --format '{{.Id}}')" >> "$GITHUB_ENV"
-          echo "MEWCODE_PROXY_IMAGE=sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c" >> "$GITHUB_ENV"
+          echo "MEWCODE_PROXY_IMAGE=$(docker image inspect ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c --format '{{.Id}}')" >> "$GITHUB_ENV"
 
       - name: Run Phase 2 executor security gate
         run: >-
