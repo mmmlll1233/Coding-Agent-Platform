@@ -38,6 +38,11 @@ jobs:
       - name: Sync locked dependencies
         run: uv sync --frozen --group dev
 
+      - name: Create test state directory
+        run: >-
+          uv run python -c "from pathlib import Path;
+          Path('.mewcode').mkdir(exist_ok=True)"
+
       - name: Run default test gate
         run: >-
           uv run pytest -q --strict-markers --enforce-platform-outcomes
