@@ -14,7 +14,9 @@ jobs:
   phase5-live:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: phase5-live
+    # Reuse the protected GitHub App test environment provisioned for the
+    # Phase 4 live gate. Environment secrets cannot be copied by workflows.
+    environment: phase4-github-live
     services:
       postgres:
         image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
