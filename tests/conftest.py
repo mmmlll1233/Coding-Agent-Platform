@@ -109,6 +109,7 @@ def isolate_user_home_and_network(
     )
     live_github_test = bool(
         request.node.get_closest_marker("platform_github_live")
+        or request.node.get_closest_marker("platform_phase5_live")
     )
 
     def isolated_expanduser(path: Path) -> Path:
