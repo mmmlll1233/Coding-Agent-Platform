@@ -15,11 +15,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from mewcode.platform.artifacts import (
+    ArtifactService,
+    ArtifactStoreError,
+    LocalArtifactStore,
+)
 from mewcode.platform.domain import (
     RepositoryTargetRejected,
     RepositoryTargetResolver,
     RepositoryTargetUnavailable,
 )
+from mewcode.platform.execution import SensitiveValueRedactor
 from mewcode.platform.persistence import (
     ApiKeyPrincipal,
     Database,
@@ -32,6 +38,7 @@ from mewcode.platform.persistence import (
 from mewcode.platform.settings import PlatformSettings
 
 from .schemas import (
+    ArtifactResponse,
     CreateJobRequest,
     ErrorBody,
     ErrorEnvelope,
@@ -70,6 +77,8 @@ class PlatformComponents:
     database: Database
     repository: PlatformRepository
     resolver: RepositoryTargetResolver | None = None
+    artifact_store: LocalArtifactStore | None = None
+    artifact_service: ArtifactService | None = None
 
 
 def _error_response(request: Request, error: ApiError) -> JSONResponse:
@@ -135,7 +144,20 @@ def create_app(
         components = PlatformComponents(
             settings=resolved_settings,
             database=database,
-            repository=PlatformRepository(database),
+            repository=PlatformRepository(
+                database,
+                metadata_retention_days=resolved_settings.metadata_retention_days,
+            ),
+            artifact_store=LocalArtifactStore(resolved_settings.artifact_root),
+        )
+    if components.artifact_service is None and components.artifact_store is not None:
+        components.artifact_service = ArtifactService(
+            components.repository,
+            components.artifact_store,
+            redactor=SensitiveValueRedactor(()),
+            retention_days=components.settings.artifact_retention_days,
+            max_artifact_bytes=components.settings.max_artifact_bytes,
+            max_attempt_bytes=components.settings.max_attempt_artifact_bytes,
         )
 
     @asynccontextmanager
@@ -151,7 +173,7 @@ def create_app(
 
     app = FastAPI(
         title="MewCode Coding Platform",
-        version="1.0.0-phase4",
+        version="1.0.0-phase5",
         lifespan=lifespan,
     )
     app.state.components = components
@@ -386,6 +408,64 @@ def create_app(
             items=[EventResponse.from_stored(item) for item in rows],
             next_after=rows[-1].sequence if rows else after,
             has_more=has_more,
+        )
+
+    @app.get(
+        "/v1/jobs/{job_id}/artifacts",
+        response_model=list[ArtifactResponse],
+    )
+    async def list_artifacts(
+        job_id: UUID,
+        request: Request,
+        principal: Annotated[ApiKeyPrincipal, Depends(_principal)],
+    ) -> list[ArtifactResponse]:
+        repository = request.app.state.components.repository
+        try:
+            artifacts = await repository.list_artifacts(
+                principal=principal, job_id=job_id
+            )
+        except NotFound as error:
+            raise ApiError(404, "JOB_NOT_FOUND", str(error)) from error
+        return [ArtifactResponse.from_metadata(item) for item in artifacts]
+
+    @app.get("/v1/jobs/{job_id}/artifacts/{artifact_id}")
+    async def download_artifact(
+        job_id: UUID,
+        artifact_id: UUID,
+        request: Request,
+        principal: Annotated[ApiKeyPrincipal, Depends(_principal)],
+    ) -> Response:
+        current: PlatformComponents = request.app.state.components
+        try:
+            artifact = await current.repository.get_artifact(
+                principal=principal,
+                job_id=job_id,
+                artifact_id=artifact_id,
+            )
+            if current.artifact_service is None:
+                raise FileNotFoundError
+            content = await current.artifact_service.read_bytes(artifact)
+        except (NotFound, FileNotFoundError, ArtifactStoreError) as error:
+            raise ApiError(
+                404, "ARTIFACT_NOT_FOUND", "Artifact does not exist"
+            ) from error
+        filenames = {
+            "agent_log": "agent_log.ndjson",
+            "command_log": "command_log.ndjson",
+            "diff": "diff.patch",
+            "verification_report": "verification_report.json",
+        }
+        filename = filenames.get(artifact.kind, "artifact.bin")
+        return Response(
+            content=content,
+            media_type=artifact.content_type,
+            headers={
+                "ETag": f'"{artifact.sha256}"',
+                "Content-Length": str(artifact.size_bytes),
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.get("/v1/jobs/{job_id}/events/stream")

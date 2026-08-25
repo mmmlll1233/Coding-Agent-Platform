@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from mewcode.platform.domain import (
 from .database import Database
 from .orm import (
     ApiKeyRow,
+    ArtifactRow,
     AttemptRow,
     JobEventRow,
     JobInputRow,
@@ -35,6 +36,7 @@ from .orm import (
     TenantRow,
     WorkerNodeRow,
 )
+from .ports import ArtifactMetadata
 
 CLAIM_ADVISORY_LOCK = 5_251_903_303
 
@@ -95,8 +97,11 @@ class StoredEvent:
 
 
 class PlatformRepository:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, *, metadata_retention_days: int = 30
+    ) -> None:
         self.database = database
+        self.metadata_retention_days = metadata_retention_days
 
     @staticmethod
     async def _database_now(session: AsyncSession) -> datetime:
@@ -384,19 +389,188 @@ class PlatformRepository:
                     .limit(limit)
                 )
             ).all()
-        return [
-            StoredEvent(
-                id=row.id,
-                job_id=row.job_id,
-                attempt_id=row.attempt_id,
-                sequence=row.sequence,
-                attempt_sequence=row.attempt_sequence,
-                event_type=row.event_type,
-                payload=row.payload,
-                created_at=row.created_at,
+            return [
+                StoredEvent(
+                    id=row.id,
+                    job_id=row.job_id,
+                    attempt_id=row.attempt_id,
+                    sequence=row.sequence,
+                    attempt_sequence=row.attempt_sequence,
+                    event_type=row.event_type,
+                    payload=row.payload,
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
+
+    @staticmethod
+    def _artifact_metadata(row: ArtifactRow) -> ArtifactMetadata:
+        return ArtifactMetadata(
+            id=row.id,
+            job_id=row.job_id,
+            attempt_id=row.attempt_id,
+            kind=row.kind,
+            storage_key=row.storage_key,
+            sha256=row.sha256,
+            size_bytes=row.size_bytes,
+            content_type=row.content_type,
+            expires_at=row.expires_at,
+            created_at=row.created_at,
+        )
+
+    async def attempt_artifact_bytes(self, attempt_id: UUID) -> int:
+        async with self.database.sessions() as session:
+            value = await session.scalar(
+                select(func.coalesce(func.sum(ArtifactRow.size_bytes), 0)).where(
+                    ArtifactRow.attempt_id == attempt_id
+                )
             )
-            for row in rows
-        ]
+            return int(value or 0)
+
+    async def add_artifact_fenced(
+        self,
+        *,
+        artifact: ArtifactMetadata,
+        worker_id: str,
+        fencing_token: UUID,
+    ) -> ArtifactMetadata:
+        if artifact.attempt_id is None:
+            raise ValueError("Attempt Artifact requires attempt_id")
+        async with self.database.sessions.begin() as session:
+            attempt, job, _ = await self._locked_lease(
+                session,
+                attempt_id=artifact.attempt_id,
+                worker_id=worker_id,
+                fencing_token=fencing_token,
+            )
+            if artifact.job_id != job.id or artifact.attempt_id != attempt.id:
+                raise LeaseLost()
+            row = ArtifactRow(
+                id=artifact.id,
+                job_id=artifact.job_id,
+                attempt_id=artifact.attempt_id,
+                kind=artifact.kind,
+                storage_key=artifact.storage_key,
+                sha256=artifact.sha256,
+                size_bytes=artifact.size_bytes,
+                content_type=artifact.content_type,
+                expires_at=artifact.expires_at,
+            )
+            session.add(row)
+            await session.flush()
+            await self._append_event(
+                session,
+                job_id=job.id,
+                attempt_id=attempt.id,
+                event_type="artifact_created",
+                payload={
+                    "artifact_id": str(row.id),
+                    "kind": row.kind,
+                    "sha256": row.sha256,
+                    "size_bytes": row.size_bytes,
+                    "expires_at": row.expires_at.isoformat(),
+                },
+            )
+            await session.refresh(row)
+            return self._artifact_metadata(row)
+
+    async def list_artifacts(
+        self, *, principal: ApiKeyPrincipal, job_id: UUID
+    ) -> list[ArtifactMetadata]:
+        async with self.database.sessions() as session:
+            job = await session.scalar(
+                select(JobRow.id).where(
+                    JobRow.id == job_id,
+                    JobRow.tenant_id == principal.tenant_id,
+                    JobRow.requester_id == principal.requester_id,
+                )
+            )
+            if job is None:
+                raise NotFound("Job does not exist")
+            now = await self._database_now(session)
+            rows = (
+                await session.scalars(
+                    select(ArtifactRow)
+                    .where(
+                        ArtifactRow.job_id == job_id,
+                        ArtifactRow.expires_at > now,
+                    )
+                    .order_by(ArtifactRow.created_at, ArtifactRow.id)
+                )
+            ).all()
+            return [self._artifact_metadata(row) for row in rows]
+
+    async def get_artifact(
+        self,
+        *,
+        principal: ApiKeyPrincipal,
+        job_id: UUID,
+        artifact_id: UUID,
+    ) -> ArtifactMetadata:
+        async with self.database.sessions() as session:
+            now = await self._database_now(session)
+            row = await session.scalar(
+                select(ArtifactRow)
+                .join(JobRow, JobRow.id == ArtifactRow.job_id)
+                .where(
+                    ArtifactRow.id == artifact_id,
+                    ArtifactRow.job_id == job_id,
+                    ArtifactRow.expires_at > now,
+                    JobRow.tenant_id == principal.tenant_id,
+                    JobRow.requester_id == principal.requester_id,
+                )
+            )
+            if row is None:
+                raise NotFound("Artifact does not exist")
+            return self._artifact_metadata(row)
+
+    async def list_expired_artifacts(
+        self, *, limit: int = 100
+    ) -> list[ArtifactMetadata]:
+        async with self.database.sessions() as session:
+            now = await self._database_now(session)
+            rows = (
+                await session.scalars(
+                    select(ArtifactRow)
+                    .where(ArtifactRow.expires_at <= now)
+                    .order_by(ArtifactRow.expires_at, ArtifactRow.id)
+                    .limit(limit)
+                )
+            ).all()
+            return [self._artifact_metadata(row) for row in rows]
+
+    async def delete_artifact_metadata(self, artifact_id: UUID) -> bool:
+        async with self.database.sessions.begin() as session:
+            result = await session.execute(
+                delete(ArtifactRow).where(ArtifactRow.id == artifact_id)
+            )
+            return result.rowcount == 1
+
+    async def delete_expired_terminal_jobs(self, *, limit: int = 100) -> int:
+        terminal = (
+            JobStatus.SUCCEEDED.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+        )
+        async with self.database.sessions.begin() as session:
+            now = await self._database_now(session)
+            ids = (
+                await session.scalars(
+                    select(JobRow.id)
+                    .where(
+                        JobRow.status.in_(terminal),
+                        JobRow.retention_until.is_not(None),
+                        JobRow.retention_until <= now,
+                    )
+                    .order_by(JobRow.retention_until, JobRow.id)
+                    .limit(limit)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+            if not ids:
+                return 0
+            result = await session.execute(delete(JobRow).where(JobRow.id.in_(ids)))
+            return int(result.rowcount or 0)
 
     async def add_input(
         self,
@@ -481,6 +655,7 @@ class PlatformRepository:
         job.error_code = None
         job.error_message = None
         job.finished_at = None
+        job.retention_until = None
         job.updated_at = await self._database_now(session)
         await session.flush()
         await self._append_event(
@@ -519,6 +694,7 @@ class PlatformRepository:
                 ensure_job_transition(current, JobStatus.CANCELLED)
                 job.status = JobStatus.CANCELLED.value
                 job.finished_at = now
+                job.retention_until = now + timedelta(days=self.metadata_retention_days)
                 if attempt is not None and attempt.status == AttemptStatus.QUEUED.value:
                     ensure_attempt_transition(
                         AttemptStatus.QUEUED, AttemptStatus.CANCELLED
@@ -527,6 +703,11 @@ class PlatformRepository:
                     attempt.finished_at = now
                 event_type = "job_cancelled"
             elif current == JobStatus.RUNNING:
+                if job.stage == AttemptStage.PUBLISHING.value:
+                    raise StateConflict(
+                        "Job cannot be cancelled after publication begins",
+                        code="JOB_NOT_CANCELLABLE",
+                    )
                 ensure_job_transition(current, JobStatus.CANCEL_REQUESTED)
                 job.status = JobStatus.CANCEL_REQUESTED.value
                 event_type = "job_cancel_requested"
@@ -873,6 +1054,7 @@ class PlatformRepository:
                 job.head_sha = outcome.head_sha
                 job.verification_succeeded = outcome.verification_succeeded
                 job.finished_at = now
+                job.retention_until = now + timedelta(days=self.metadata_retention_days)
                 event_type = "job_succeeded"
             elif outcome.status == AttemptOutcomeStatus.NEEDS_INPUT:
                 ensure_attempt_transition(
@@ -894,6 +1076,7 @@ class PlatformRepository:
                 attempt.status = AttemptStatus.CANCELLED.value
                 job.status = JobStatus.CANCELLED.value
                 job.finished_at = now
+                job.retention_until = now + timedelta(days=self.metadata_retention_days)
                 event_type = "job_cancelled"
             else:
                 ensure_attempt_transition(AttemptStatus.RUNNING, AttemptStatus.FAILED)
@@ -903,6 +1086,7 @@ class PlatformRepository:
                 attempt.failure_message = outcome.error_message
                 job.status = JobStatus.FAILED.value
                 job.finished_at = now
+                job.retention_until = now + timedelta(days=self.metadata_retention_days)
                 event_type = "job_failed"
 
             job.stage = AttemptStage.CLEANING_UP.value
@@ -961,6 +1145,9 @@ class PlatformRepository:
                     attempt.status = AttemptStatus.CANCELLED.value
                     job.status = JobStatus.CANCELLED.value
                     job.finished_at = now
+                    job.retention_until = now + timedelta(
+                        days=self.metadata_retention_days
+                    )
                     event_type = "job_cancelled"
                     payload = {"status": JobStatus.CANCELLED.value}
                 else:
@@ -989,6 +1176,9 @@ class PlatformRepository:
                         job.error_code = "WORKER_LEASE_EXPIRED"
                         job.error_message = "Worker Lease expired"
                         job.finished_at = now
+                        job.retention_until = now + timedelta(
+                            days=self.metadata_retention_days
+                        )
                         event_type = "job_failed"
                         payload = {
                             "status": JobStatus.FAILED.value,

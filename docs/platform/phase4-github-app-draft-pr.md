@@ -4,8 +4,8 @@
 
 Phase 4 实现受信任 GitHub.com SCM 边界：GitHub App installation 校验、branch 到
 不可变 base SHA 的解析、无凭证源码归档、Workspace manifest、Git blob/tree/commit、
-确定性 `mewcode/{job_id}` 分支和幂等 Draft Pull Request。生产 Worker 仍不注册真实
-Attempt Processor；Phase 5 完成 Verification 后才会把普通 Job 接入发布链路。
+确定性 `mewcode/{job_id}` 分支和幂等 Draft Pull Request。Phase 5 已通过内置生产
+Attempt Processor 将该 SCM 边界接入 Verification、Artifact 与发布链路。
 
 Executor 不接收 `.git`、Git remote、App private key 或 installation token。SCM Adapter
 只创建新 ref，不更新既有 ref；同名分支必须通过 commit trailer 和 PR marker 证明属于
@@ -24,8 +24,8 @@ MEWCODE_PLATFORM_GITHUB_TIMEOUT_SECONDS=30
 ```
 
 App installation 必须具备 Metadata read、Contents write、Pull requests write，且不能有
-Workflows write。Compose 从 `.mewcode/secrets/github_app_private_key.pem` 挂载私钥；该
-secret 本阶段只提供给 API，不提供给尚未启用的 Worker。
+Workflows write。Compose 从 `.mewcode/secrets/github_app_private_key.pem` 挂载私钥；
+API Resolver 与 Phase 5 Worker SCM Adapter可以读取，Executor 始终不可见。
 
 仓库首版不支持 Git LFS、submodule、`.github/**` 修改、GitHub Enterprise Server、
 现有分支更新、正式 PR 或合并。默认 Delivery 上限是 200 个变化路径、单文件 5 MiB、

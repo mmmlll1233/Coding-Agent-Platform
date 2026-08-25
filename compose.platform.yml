@@ -60,6 +60,21 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  storage-init:
+    <<: *platform-service
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        install -d -m 0700 -o 65532 -g 65532
+        /var/lib/mewcode/state /var/lib/mewcode/artifacts
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    volumes:
+      - platform_state:/var/lib/mewcode/state
+      - platform_artifacts:/var/lib/mewcode/artifacts
+
   api:
     <<: *platform-service
     command: ["api"]
@@ -72,29 +87,64 @@ services:
       MEWCODE_PLATFORM_REPOSITORY_RESOLVER_FACTORY: mewcode.platform.scm:create_repository_resolver
       MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID: ${MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID:-}
       MEWCODE_PLATFORM_GITHUB_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
+      MEWCODE_PLATFORM_ARTIFACT_ROOT: /var/lib/mewcode/artifacts
     secrets:
       - api_db_password
       - github_app_private_key
     ports:
       - 127.0.0.1:8080:8080
+    volumes:
+      - platform_artifacts:/var/lib/mewcode/artifacts:ro
     depends_on:
       grant-runtime:
+        condition: service_completed_successfully
+      storage-init:
         condition: service_completed_successfully
 
   worker:
     <<: *platform-service
-    profiles: ["worker"]
     command: ["worker"]
     restart: unless-stopped
+    group_add:
+      - "${MEWCODE_DOCKER_SOCKET_GID:-0}"
     environment:
       MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_worker@postgres:5432/mewcode
       MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/worker_db_password
-      MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY: ${MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY:-}
+      MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY: mewcode.platform.processing:create_attempt_processor_factory
       MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS: ${MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS:-1}
+      MEWCODE_PLATFORM_LLM_PROTOCOL: ${MEWCODE_PLATFORM_LLM_PROTOCOL:-}
+      MEWCODE_PLATFORM_LLM_BASE_URL: ${MEWCODE_PLATFORM_LLM_BASE_URL:-}
+      MEWCODE_PLATFORM_LLM_MODEL: ${MEWCODE_PLATFORM_LLM_MODEL:-}
+      MEWCODE_PLATFORM_LLM_API_KEY_FILE: /run/secrets/platform_llm_api_key
+      MEWCODE_PLATFORM_EXECUTOR_IMAGE: ${MEWCODE_PLATFORM_EXECUTOR_IMAGE:-}
+      MEWCODE_PLATFORM_PROXY_IMAGE: ${MEWCODE_PLATFORM_PROXY_IMAGE:-}
+      MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID: ${MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID:-}
+      MEWCODE_PLATFORM_GITHUB_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
+      MEWCODE_PLATFORM_STATE_ROOT: /var/lib/mewcode/state
+      MEWCODE_PLATFORM_ARTIFACT_ROOT: /var/lib/mewcode/artifacts
+      MEWCODE_PLATFORM_EGRESS_NETWORK: ${MEWCODE_PLATFORM_EGRESS_NETWORK:-mewcode-phase2-egress}
+      MEWCODE_PLATFORM_EGRESS_ALLOWLIST: ${MEWCODE_PLATFORM_EGRESS_ALLOWLIST:-pypi.org,files.pythonhosted.org}
+      MEWCODE_PLATFORM_SETUP_TIMEOUT_BUDGET_SECONDS: ${MEWCODE_PLATFORM_SETUP_TIMEOUT_BUDGET_SECONDS:-600}
+      MEWCODE_PLATFORM_VERIFICATION_TIMEOUT_BUDGET_SECONDS: ${MEWCODE_PLATFORM_VERIFICATION_TIMEOUT_BUDGET_SECONDS:-600}
+      MEWCODE_PLATFORM_MAX_REPAIR_ROUNDS: ${MEWCODE_PLATFORM_MAX_REPAIR_ROUNDS:-2}
+      MEWCODE_PLATFORM_ARTIFACT_RETENTION_DAYS: ${MEWCODE_PLATFORM_ARTIFACT_RETENTION_DAYS:-7}
+      MEWCODE_PLATFORM_METADATA_RETENTION_DAYS: ${MEWCODE_PLATFORM_METADATA_RETENTION_DAYS:-30}
+      MEWCODE_PLATFORM_JANITOR_INTERVAL_SECONDS: ${MEWCODE_PLATFORM_JANITOR_INTERVAL_SECONDS:-3600}
     secrets:
       - worker_db_password
+      - platform_llm_api_key
+      - github_app_private_key
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - platform_state:/var/lib/mewcode/state
+      - platform_artifacts:/var/lib/mewcode/artifacts
+    networks:
+      - default
+      - executor-egress
     depends_on:
       grant-runtime:
+        condition: service_completed_successfully
+      storage-init:
         condition: service_completed_successfully
 
 secrets:
@@ -106,6 +156,16 @@ secrets:
     file: ${MEWCODE_WORKER_DB_PASSWORD_FILE:-.mewcode/secrets/worker_db_password}
   github_app_private_key:
     file: ${MEWCODE_GITHUB_APP_PRIVATE_KEY_FILE:-.mewcode/secrets/github_app_private_key.pem}
+  platform_llm_api_key:
+    file: ${MEWCODE_PLATFORM_LLM_API_KEY_FILE:-.mewcode/secrets/platform_llm_api_key}
 
 volumes:
   platform_postgres_data:
+  platform_state:
+  platform_artifacts:
+
+networks:
+  default:
+    name: mewcode-platform-control
+  executor-egress:
+    name: ${MEWCODE_PLATFORM_EGRESS_NETWORK:-mewcode-phase2-egress}

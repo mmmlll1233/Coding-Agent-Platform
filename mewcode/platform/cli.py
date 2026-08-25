@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import inspect
 import logging
 import os
 import sys
@@ -17,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
 from mewcode.platform.api import PlatformComponents, create_app
+from mewcode.platform.artifacts import LocalArtifactStore
 from mewcode.platform.execution import (
     SensitiveValueRedactor,
     shared_platform_redactor,
@@ -49,14 +51,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_component(path: str, settings: PlatformSettings) -> Any:
+def _load_component(
+    path: str, settings: PlatformSettings, **factory_options: Any
+) -> Any:
     module_name, separator, attribute_name = path.partition(":")
     if not separator or not module_name or not attribute_name:
         raise RuntimeError(
             "Component paths must use the 'package.module:factory' format"
         )
     factory = getattr(importlib.import_module(module_name), attribute_name)
-    component = factory(settings)
+    signature = inspect.signature(factory)
+    accepts_options = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    supported_options = (
+        factory_options
+        if accepts_options
+        else {
+            name: value
+            for name, value in factory_options.items()
+            if name in signature.parameters
+        }
+    )
+    component = factory(settings, **supported_options)
     if component is None:
         raise RuntimeError(f"Component factory {path} returned None")
     return component
@@ -86,10 +104,13 @@ def _secret_redactor(settings: PlatformSettings) -> SensitiveValueRedactor:
     if settings.github_private_key_file:
         try:
             secrets.append(
-                Path(settings.github_private_key_file).read_text(
-                    encoding="utf-8"
-                )
+                Path(settings.github_private_key_file).read_text(encoding="utf-8")
             )
+        except OSError:
+            pass
+    if settings.llm_api_key_file:
+        try:
+            secrets.append(Path(settings.llm_api_key_file).read_text(encoding="utf-8"))
         except OSError:
             pass
     redactor = shared_platform_redactor()
@@ -129,9 +150,11 @@ async def _grant_runtime_roles(settings: PlatformSettings) -> int:
     statements = (
         "GRANT USAGE ON SCHEMA public TO mewcode_api, mewcode_worker",
         "GRANT SELECT ON alembic_version TO mewcode_api",
-        "GRANT SELECT ON tenants, requesters, api_keys, worker_nodes TO mewcode_api",
+        "GRANT SELECT ON tenants, requesters, api_keys, worker_nodes, artifacts TO mewcode_api",
         "GRANT SELECT, INSERT, UPDATE ON jobs, attempts, job_inputs, job_events TO mewcode_api",
         "GRANT SELECT, INSERT, UPDATE ON jobs, attempts, job_events, worker_nodes TO mewcode_worker",
+        "GRANT SELECT, INSERT, DELETE ON artifacts TO mewcode_worker",
+        "GRANT DELETE ON jobs TO mewcode_worker",
         "GRANT SELECT ON job_inputs TO mewcode_worker",
     )
     try:
@@ -148,13 +171,23 @@ async def _run_worker(settings: PlatformSettings) -> int:
         raise RuntimeError(
             "MEWCODE_PLATFORM_ATTEMPT_PROCESSOR_FACTORY is required for Worker startup"
         )
-    processor_factory = _load_component(settings.attempt_processor_factory, settings)
+    settings.validate_worker()
     database = create_database(settings)
+    repository = PlatformRepository(
+        database, metadata_retention_days=settings.metadata_retention_days
+    )
+    redactor = _secret_redactor(settings)
+    processor_factory = _load_component(
+        settings.attempt_processor_factory,
+        settings,
+        repository=repository,
+        redactor=redactor,
+    )
     service = WorkerService(
         settings,
-        PlatformRepository(database),
+        repository,
         processor_factory,
-        redactor=_secret_redactor(settings),
+        redactor=redactor,
     )
     try:
         await service.run_forever()
@@ -193,8 +226,12 @@ def main(argv: list[str] | None = None) -> int:
             components=PlatformComponents(
                 settings=settings,
                 database=database,
-                repository=PlatformRepository(database),
+                repository=PlatformRepository(
+                    database,
+                    metadata_retention_days=settings.metadata_retention_days,
+                ),
                 resolver=resolver,
+                artifact_store=LocalArtifactStore(settings.artifact_root),
             )
         )
         uvicorn.run(

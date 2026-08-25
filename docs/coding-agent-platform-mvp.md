@@ -154,11 +154,14 @@ PREPARING
 | `POST` | `/v1/jobs/{job_id}/input` | 为 `NEEDS_INPUT` 补充信息并重新排队 |
 | `POST` | `/v1/jobs/{job_id}/cancel` | 幂等请求取消 |
 | `POST` | `/v1/jobs/{job_id}/retry` | 对 `FAILED` Job 创建新 Attempt |
-| `POST` | `/v1/attachments` | 上传日志、截图和需求文档，返回 `attachment_id` |
+| `GET` | `/v1/jobs/{job_id}/artifacts` | 列出所属 Requester 可访问的执行证据 |
+| `GET` | `/v1/jobs/{job_id}/artifacts/{artifact_id}` | 下载并校验 Artifact |
 | `GET` | `/health/live` | 进程存活检查 |
 | `GET` | `/health/ready` | 数据库和调度能力检查 |
 
 API Key 只在创建时显示，数据库保存哈希；日志只记录 key id。首版虽然只监听 localhost，仍执行认证，以免日后扩大监听地址时裸奔。
+请求附件上传不属于当前 MVP，`POST /v1/attachments` 不注册，所有 `attachment_ids`
+必须为空。
 
 ## 6. 持久化模型
 
@@ -199,7 +202,7 @@ API Key 只在创建时显示，数据库保存哈希；日志只记录 key id�
 - `id`, `job_id`, `attempt_id`, `kind`, `storage_key`
 - `sha256`, `size_bytes`, `content_type`, `expires_at`
 
-`kind` 首版包括 `request_attachment`、`agent_log`、`command_log`、`diff` 和 `verification_report`。
+`kind` 首版只包括 `agent_log`、`command_log`、`diff` 和 `verification_report`。
 
 ### `notification_outbox`
 
@@ -214,12 +217,12 @@ API Key 只在创建时显示，数据库保存哈希；日志只记录 key id�
 2. **仓库验证**：确认 GitHub App installation 对仓库有权；解析并保存 `base_sha`。
 3. **准备工作区**：SCM Adapter 从固定 SHA 为新 Attempt 创建干净的 Attempt Workspace；禁用 submodule、LFS 和 Git hooks；清除凭证和 remote URL 中的敏感信息。
 4. **启动 Executor**：非 root 用户、只挂载当前 Attempt Workspace、清洗环境变量、限制 CPU/内存/PID/磁盘和总时长；不挂载 Docker socket。
-5. **Setup**：逐条运行调用方提供的 setup commands；失败时生成结构化日志并进入 `FAILED` 或 `NEEDS_INPUT`。
+5. **Setup**：逐条运行调用方提供的 setup commands；首个非零退出或超时以 `SETUP_FAILED` 结束。
 6. **分析与修改**：AgentRunner 复用现有 Agent 循环，但所有文件访问绑定 Attempt Workspace，所有 Bash 调用委托给 Executor。
 7. **Verification**：平台而不是 Agent 逐条执行 Verification Contract；所有 exit code 必须为 0。失败结果最多反馈给 Agent 进行两轮修复，再执行完整 Verification。
-8. **形成 Delivery**：Verification 成功后，受信任 SCM Adapter 生成提交、推送 `mewcode/{job_id}` 分支，并幂等创建 Draft PR。
-9. **持久化终态**：写入 PR URL、最终 commit、Verification 报告和 usage，然后置为 `SUCCEEDED`。
-10. **通知与清理**：Outbox 投递飞书；销毁 Executor 和工作区；按策略保留元数据与 Artifacts。
+8. **可信收口**：导出 Workspace、生成并持久化四类 Artifact，关闭 Runtime，并确认 Executor 容器、网络和 volume 全部清零。
+9. **形成 Delivery**：事务推进到不可取消的 `PUBLISHING` 后，受信任 SCM Adapter 生成提交、推送 `mewcode/{job_id}` 分支，并幂等创建 Draft PR。
+10. **持久化终态**：写入 PR URL、最终 commit、Verification 报告和 usage，然后置为 `SUCCEEDED`；通知属于 Phase 6。
 
 PR 内容固定包含：Work Request 摘要、修改说明、Verification 命令及结果、风险/未覆盖项、Job ID和生成声明。Agent 不得创建正式 PR、合并 PR、force push 或改写目标分支。
 
@@ -338,15 +341,21 @@ Repository Target Resolver 与 Attempt Processor 通过 port 注入；未配置�
 
 交付状态（2026-08-22）：已完成。GitHub.com App Resolver、短期且单仓库权限收窄的
 installation token、无 `.git` 归档、可信 manifest、Git Data API 发布、确定性分支与
-幂等 Draft PR 已实现；完整 Delivery 证据已接入 PostgreSQL 终态。生产 Worker 仍等
-Phase 5 Verification 后启用。交付与运行说明见
+幂等 Draft PR 已实现；完整 Delivery 证据已接入 PostgreSQL 终态。生产 Worker 的发布
+链路已在 Phase 5 接通。交付与运行说明见
 `docs/platform/phase4-github-app-draft-pr.md`，安全取舍见 ADR 0011。
 
 验收：在专用测试仓库中完成端到端 Draft PR；重复发布不产生第二个分支或 PR；Agent 容器内找不到 GitHub token。
 
-### Phase 5：Verification 与 Artifact（3～4 天）
+### Phase 5：Verification 与 Artifact（5～7 天）
 
 - 执行调用方 setup/verification commands、生成报告、失败修复循环和保留策略。
+
+交付状态（2026-08-25）：实现已完成。生产 Attempt Processor、最多两轮 Repair Round、
+四类受信任 Artifact、fencing metadata、Requester 下载、保留 janitor、发布前清理闸门
+和 `PUBLISHING` 取消冲突均已落地。默认与 PostgreSQL 测试已纳入门禁；整体状态需在
+受保护 Phase 5 live gate及阶段 1–4 回归均通过后再标记为正式验收完成。交付说明见
+`docs/platform/phase5-verification-artifacts.md`，证据边界见 ADR 0012。
 
 验收：任意一条 Verification 失败都不创建 PR；成功 PR包含完整且可追踪的 Verification 证据。
 

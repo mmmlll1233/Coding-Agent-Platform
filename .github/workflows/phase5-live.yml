@@ -1,0 +1,98 @@
+name: Phase 5 Verification and Artifact live gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase5-live
+  cancel-in-progress: false
+
+jobs:
+  phase5-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: phase5-live
+    services:
+      postgres:
+        image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+        env:
+          POSTGRES_DB: mewcode_phase5
+          POSTGRES_USER: mewcode_phase5
+          POSTGRES_PASSWORD: mewcode_phase5_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mewcode_phase5 -d mewcode_phase5"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      MEWCODE_TEST_DATABASE_URL: postgresql+asyncpg://mewcode_phase5:mewcode_phase5_password@127.0.0.1:5432/mewcode_phase5
+      MEWCODE_TEST_GITHUB_APP_CLIENT_ID: ${{ vars.MEWCODE_TEST_GITHUB_APP_CLIENT_ID }}
+      MEWCODE_TEST_GITHUB_INSTALLATION_ID: ${{ vars.MEWCODE_TEST_GITHUB_INSTALLATION_ID }}
+      MEWCODE_TEST_GITHUB_OWNER: ${{ vars.MEWCODE_TEST_GITHUB_OWNER }}
+      MEWCODE_TEST_GITHUB_REPOSITORY: ${{ vars.MEWCODE_TEST_GITHUB_REPOSITORY }}
+      MEWCODE_TEST_GITHUB_BASE_REF: ${{ vars.MEWCODE_TEST_GITHUB_BASE_REF }}
+      MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64: ${{ secrets.MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64 }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Build immutable Executor images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f docker/executor/Dockerfile -t mewcode-executor:phase5-live .
+          docker pull ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+          echo "MEWCODE_EXECUTOR_IMAGE=$(docker image inspect mewcode-executor:phase5-live --format '{{.Id}}')" >> "$GITHUB_ENV"
+          echo "MEWCODE_PROXY_IMAGE=$(docker image inspect ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c --format '{{.Id}}')" >> "$GITHUB_ENV"
+
+      - name: Materialize protected test secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/mewcode-phase5-app.pem"
+          printf '%s' "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_B64" | base64 --decode > "$key_file"
+          chmod 600 "$key_file"
+          printf '%s' 'phase5-live-secret-canary' > "$RUNNER_TEMP/mewcode-phase5-llm-key"
+          chmod 600 "$RUNNER_TEMP/mewcode-phase5-llm-key"
+          echo "MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE=$key_file" >> "$GITHUB_ENV"
+          echo "MEWCODE_TEST_LLM_KEY_FILE=$RUNNER_TEMP/mewcode-phase5-llm-key" >> "$GITHUB_ENV"
+
+      - name: Run protected Phase 5 live gate
+        run: >-
+          uv run pytest -q --strict-markers --enforce-platform-outcomes
+          -m platform_phase5_live
+
+      - name: Remove protected test secrets
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$MEWCODE_TEST_GITHUB_PRIVATE_KEY_FILE"
+          rm -f "$MEWCODE_TEST_LLM_KEY_FILE"
+
+      - name: Assert no Attempt Docker resources remain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(docker ps -aq --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker volume ls -q --filter label=com.mewcode.attempt_id)"
+          test -z "$(docker network ls -q --filter label=com.mewcode.attempt_id)"

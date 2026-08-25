@@ -72,6 +72,30 @@ class WorkerService:
             except TimeoutError:
                 continue
 
+    async def _janitor_loop(self) -> None:
+        cleanup = getattr(self.processor_factory, "cleanup_expired", None)
+        if cleanup is None:
+            await self._stop.wait()
+            return
+        while not self._stop.is_set():
+            try:
+                artifacts, jobs = await cleanup()
+                if artifacts or jobs:
+                    log.info(
+                        "Retention janitor deleted artifacts=%s jobs=%s",
+                        artifacts,
+                        jobs,
+                    )
+            except Exception:
+                log.exception("Retention janitor failed")
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=self.settings.janitor_interval_seconds,
+                )
+            except TimeoutError:
+                continue
+
     async def _lease_monitor(
         self,
         claimed: ClaimedAttempt,
@@ -239,9 +263,10 @@ class WorkerService:
             self._worker_heartbeat_loop(), name="worker-heartbeat"
         )
         recovery = asyncio.create_task(self._recovery_loop(), name="lease-recovery")
+        janitor = asyncio.create_task(self._janitor_loop(), name="retention-janitor")
         try:
             while not self._stop.is_set():
-                for background in (heartbeat, recovery):
+                for background in (heartbeat, recovery, janitor):
                     if background.done():
                         error = background.exception()
                         raise RuntimeError(
@@ -268,7 +293,8 @@ class WorkerService:
             self._stop.set()
             heartbeat.cancel()
             recovery.cancel()
-            await asyncio.gather(heartbeat, recovery, return_exceptions=True)
+            janitor.cancel()
+            await asyncio.gather(heartbeat, recovery, janitor, return_exceptions=True)
             if self._active:
                 for task in tuple(self._active):
                     task.cancel()

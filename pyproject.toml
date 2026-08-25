@@ -46,4 +46,5 @@ markers = [
     "resource_exhaustion: runs bounded resource pressure only inside an isolated executor",
     "platform_postgres: requires the Phase 3 PostgreSQL integration database",
     "platform_github_live: requires a protected Phase 4 GitHub App test repository",
+    "platform_phase5_live: requires protected PostgreSQL, Docker, and GitHub App integration",
 ]

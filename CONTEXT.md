@@ -44,6 +44,14 @@ _Avoid_: Test command, suggested tests
 The collected evidence that a proposed change satisfies every check in its Verification Contract.
 _Avoid_: Testing, validation
 
+**Repair Round**:
+A bounded Agent modification cycle triggered by failed Verification before the complete Verification Contract is run again.
+_Avoid_: Retry, test rerun
+
+**Artifact**:
+Redacted execution evidence retained for an Attempt outside its disposable Attempt Workspace.
+_Avoid_: Attachment, workspace file, result
+
 **Delivery**:
 The reviewable code change produced for a successful Job; for the MVP, a Delivery is a GitHub Draft Pull Request.
 _Avoid_: Result, output, patch

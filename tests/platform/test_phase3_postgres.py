@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, replace
+from datetime import timedelta
+from uuid import UUID
 
 import httpx
 import pytest
@@ -18,13 +20,16 @@ from mewcode.platform.domain import (
     AttemptLease,
     AttemptOutcome,
     AttemptOutcomeStatus,
+    AttemptStage,
     JobStatus,
     RepositoryTarget,
 )
 from mewcode.platform.execution import SensitiveValueRedactor
 from mewcode.platform.persistence import (
+    ArtifactMetadata,
     IdempotencyConflict,
     LeaseLost,
+    NotFound,
     PlatformRepository,
     PostgresJobEventSink,
     StateConflict,
@@ -142,9 +147,9 @@ def test_phase4_migration_fails_closed_on_incomplete_historical_success(
               verification_succeeded
             ) VALUES (
               '{job_id}', '{tenant_id}', '{requester_id}', 'phase4-migration',
-              '{'4' * 64}', 'SUCCEEDED', 7, 'Acme', 'Repo', 'main',
-              '{'a' * 40}', '{{}}'::jsonb, '{{}}'::jsonb,
-              'https://github.com/Acme/Repo/pull/4', '{'b' * 40}', true
+              '{"4" * 64}', 'SUCCEEDED', 7, 'Acme', 'Repo', 'main',
+              '{"a" * 40}', '{{}}'::jsonb, '{{}}'::jsonb,
+              'https://github.com/Acme/Repo/pull/4', '{"b" * 40}', true
             )
             """,
         )
@@ -344,9 +349,7 @@ async def test_input_retry_and_cancel_create_only_expected_attempts(database) ->
             error_code="TEST_FAILURE",
         ),
     )
-    retried = await repository.retry_job(
-        principal=principal, job_id=failed_job.id
-    )
+    retried = await repository.retry_job(principal=principal, job_id=failed_job.id)
     assert retried.status == JobStatus.QUEUED.value
     assert retried.current_attempt_no == 2
     with pytest.raises(StateConflict):
@@ -422,6 +425,110 @@ async def test_phase4_delivery_evidence_is_persisted_atomically(database) -> Non
                 await session.execute(
                     update(JobRow).where(JobRow.id == job.id).values(**invalid)
                 )
+
+
+@pytest.mark.asyncio
+async def test_phase5_artifacts_are_fenced_and_requester_isolated(database) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "artifact-owner")
+    _, other = await _principal(repository, "artifact-other")
+    job, _ = await _create(repository, principal, "artifact-fencing")
+    claimed = await repository.claim_attempt(
+        worker_id="artifact-worker", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert claimed is not None
+    lease = claimed.lease
+    now = lease.lease_expires_at
+    artifact = ArtifactMetadata(
+        id=UUID("00000000-0000-0000-0000-0000000005a1"),
+        job_id=job.id,
+        attempt_id=lease.attempt_id,
+        kind="verification_report",
+        storage_key=f"{job.id}/{lease.attempt_id}/00000000-0000-0000-0000-0000000005a1",
+        sha256="a" * 64,
+        size_bytes=2,
+        content_type="application/json",
+        expires_at=now + timedelta(days=7),
+    )
+    stored = await repository.add_artifact_fenced(
+        artifact=artifact,
+        worker_id=lease.worker_id,
+        fencing_token=lease.fencing_token,
+    )
+    assert stored.created_at is not None
+    assert (await repository.list_artifacts(principal=principal, job_id=job.id))[
+        0
+    ].id == artifact.id
+    with pytest.raises(NotFound):
+        await repository.list_artifacts(principal=other, job_id=job.id)
+    with pytest.raises(LeaseLost):
+        await repository.add_artifact_fenced(
+            artifact=replace(artifact, id=UUID(int=0x5A2)),
+            worker_id="stale-worker",
+            fencing_token=lease.fencing_token,
+        )
+
+
+@pytest.mark.asyncio
+async def test_phase5_publishing_stage_rejects_cancellation(database) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "publishing")
+    job, _ = await _create(repository, principal, "publishing-cancel")
+    claimed = await repository.claim_attempt(
+        worker_id="publishing-worker", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert claimed is not None
+    await repository.report_stage(
+        attempt_id=claimed.lease.attempt_id,
+        worker_id=claimed.lease.worker_id,
+        fencing_token=claimed.lease.fencing_token,
+        stage=AttemptStage.PUBLISHING,
+    )
+    with pytest.raises(StateConflict) as caught:
+        await repository.cancel_job(principal=principal, job_id=job.id)
+    assert caught.value.code == "JOB_NOT_CANCELLABLE"
+
+
+@pytest.mark.asyncio
+async def test_phase5_retention_deletes_only_expired_terminal_jobs(database) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "retention")
+    failed_job, _ = await _create(repository, principal, "expired-terminal")
+    failed_attempt = await repository.claim_attempt(
+        worker_id="retention-worker-a", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert failed_attempt is not None
+    await repository.finish_attempt(
+        attempt_id=failed_attempt.lease.attempt_id,
+        worker_id=failed_attempt.lease.worker_id,
+        fencing_token=failed_attempt.lease.fencing_token,
+        outcome=AttemptOutcome(
+            status=AttemptOutcomeStatus.FAILED, error_code="TEST_FAILURE"
+        ),
+    )
+    needs_job, _ = await _create(repository, principal, "needs-input-retention")
+    needs_attempt = await repository.claim_attempt(
+        worker_id="retention-worker-b", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert needs_attempt is not None
+    await repository.finish_attempt(
+        attempt_id=needs_attempt.lease.attempt_id,
+        worker_id=needs_attempt.lease.worker_id,
+        fencing_token=needs_attempt.lease.fencing_token,
+        outcome=AttemptOutcome(status=AttemptOutcomeStatus.NEEDS_INPUT),
+    )
+    async with database.sessions.begin() as session:
+        await session.execute(
+            update(JobRow)
+            .where(JobRow.id == failed_job.id)
+            .values(retention_until=func.now() - text("interval '1 second'"))
+        )
+    assert await repository.delete_expired_terminal_jobs() == 1
+    with pytest.raises(NotFound):
+        await repository.get_job(principal=principal, job_id=failed_job.id)
+    retained = await repository.get_job(principal=principal, job_id=needs_job.id)
+    assert retained.status == JobStatus.NEEDS_INPUT.value
+    assert retained.retention_until is None
 
 
 @dataclass

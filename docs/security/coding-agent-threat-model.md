@@ -2,7 +2,7 @@
 
 ## 1. 目的与范围
 
-本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App 与幂等 Draft PR SCM 链路已在 Phase 4 实现，Verification 发布编排和通知仍属于后续阶段。
+本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App 与幂等 Draft PR SCM 链路已在 Phase 4 实现，Verification、可信 Artifact 与发布编排已在 Phase 5 实现，通知仍属于后续阶段。
 
 MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、构建脚本、依赖代码、Agent 生成的命令和 Verification 命令全部视为不可信输入。内部单租户降低了身份和计费复杂度，但不降低仓库内容、供应链代码或提示注入的风险。
 
@@ -55,6 +55,8 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 | `SCM-001` | Agent 命令读取或复用 GitHub installation token | token 只存在于 SCM Adapter，Executor 的 Git remote 不含凭证 | `secret_canary` 加 SCM 集成测试 | Phase 4 |
 | `SCM-002` | force push、改写 base、修改 workflows、启用 LFS/submodule/hooks | SCM Adapter 固定 SHA、限制路径和发布操作；拒绝 Delivery | GitHub 测试仓库 | Phase 4 |
 | `VER-001` | Agent 跳过、替换或将非零 Verification 解释为成功 | 平台逐条运行原始 Verification Contract；任一失败均不发布 | Verification 集成测试 | Phase 1/5 |
+| `ART-001` | Executor 或仓库内容伪造、覆盖或泄漏 Verification 证据 | Executor 外可信存储、统一脱敏、原子写入、fencing 和哈希校验；证据不完整则不发布 | Artifact 与 Phase 5 live gate | Phase 5 |
+| `RACE-001` | 取消与发布并发导致 CANCELLED Job 遗留 PR | Artifact/清理完成后事务切换 PUBLISHING；该阶段拒绝取消 | PostgreSQL 行锁竞态测试 | Phase 5 |
 | `EVT-001` | 内存事件丢失、乱序或跨 Job 混合 | 持久化前绑定 job/attempt/sequence，SSE 只投影持久化事件 | JobEvent/恢复测试 | Phase 3 |
 | `AVAIL-001` | LLM、GitHub、飞书或 Worker 崩溃造成重复任务或重复 PR | 租约、幂等键、Outbox 和幂等 SCM 发布 | 崩溃与重复投递测试 | Phase 3/4/6/7 |
 
@@ -155,3 +157,28 @@ Docker Executor 安全门禁：6 passed
 唯一 skip 仍是 Windows symlink capability；本地未提供受保护 GitHub App 凭证，因而
 没有执行真实仓库门禁。该门禁只能通过 `workflow_dispatch` 和
 `phase4-github-live` Environment 手动运行。
+
+## 13. Phase 5 验收记录
+
+`VER-001` 已覆盖每轮完整 Verification Contract、最多两轮 Repair Round和所有 fatal
+执行故障不修复。`ART-001` 已覆盖 Executor 外存储、原子重命名、配额、路径逃逸、
+四类 Artifact脱敏、Requester 隔离、Lease/fencing 和过期清理。`RACE-001` 已通过
+PostgreSQL 行锁验证 `PUBLISHING` 拒绝取消，且取消先提交时 Processor 不调用 SCM。
+
+默认、PostgreSQL、Docker 安全和资源压力门禁可在本地执行；真实 GitHub 组合验收由
+受保护的 `platform_phase5_live` 手动门禁运行确定性 Scripted Agent，并在 `finally`
+关闭测试 Draft PR、删除分支和检查 Docker 资源清零。
+
+2026-08-25 在 Windows、Python 3.13、PostgreSQL 16 与 Docker Desktop Linux Engine
+上执行：
+
+```text
+默认无外部服务门禁：671 passed, 1 skipped, 24 deselected
+PostgreSQL 门禁：13 passed
+Docker Executor 安全与 Phase 5 Processor 门禁：7 passed
+隔离资源压力门禁：2 passed
+```
+
+平台生产镜像与 Compose 配置均已校验，所有 Docker 门禁结束后 Attempt container、
+network 和 volume 均为零残留。受保护 GitHub App 凭证不在本机测试范围内，
+`platform_phase5_live` 仍需在 `phase5-live` Environment 通过 `workflow_dispatch` 运行。

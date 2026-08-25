@@ -17,6 +17,7 @@ class ArtifactMetadata:
     size_bytes: int
     content_type: str
     expires_at: datetime
+    created_at: datetime | None = None
 
 
 class ArtifactMetadataRepository(Protocol):

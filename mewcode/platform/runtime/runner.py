@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from mewcode.agent import (
@@ -39,12 +39,26 @@ class _EventSinkFailure(RuntimeError):
 class JobRunner:
     """Drive one Agent attempt and project its typed events to a durable boundary."""
 
-    def __init__(self, runtime: Any, sink: JobEventSink | None = None) -> None:
+    def __init__(
+        self,
+        runtime: Any,
+        sink: JobEventSink | None = None,
+        *,
+        owns_runtime: bool = True,
+        initial_sequence: int = 0,
+    ) -> None:
+        if initial_sequence < 0:
+            raise ValueError("initial_sequence must be non-negative")
         self.runtime = runtime
         self.sink = sink or NullJobEventSink()
+        self.owns_runtime = owns_runtime
         self._active_task: asyncio.Task[Any] | None = None
         self._used = False
-        self._sequence = 0
+        self._sequence = initial_sequence
+
+    @property
+    def last_sequence(self) -> int:
+        return self._sequence
 
     def _redact_value(self, value: Any) -> Any:
         services = getattr(self.runtime, "services", {})
@@ -84,7 +98,7 @@ class JobRunner:
             job_id=request.job_id,
             attempt_id=request.attempt_id,
             attempt_sequence=self._sequence,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             event_type=event_type,
             payload=self._redact_value(payload or {}),
         )
@@ -164,7 +178,7 @@ class JobRunner:
             raise RuntimeError("JobRunner instances can execute only one Attempt")
         self._used = True
         self._active_task = asyncio.current_task()
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         status = JobRunStatus.FAILED
         error_code: str | None = "INCOMPLETE_AGENT_RUN"
         error_message: str | None = "Agent stream ended without LoopComplete"
@@ -259,25 +273,23 @@ class JobRunner:
             status = JobRunStatus.FAILED
             error_code = "EVENT_SINK_FAILED"
             error_message = str(exc)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Runtime trust boundary
             status = JobRunStatus.FAILED
             error_code = (
-                "RUNTIME_EXCEPTION"
-                if started_runtime
-                else "EXECUTOR_START_FAILED"
+                "RUNTIME_EXCEPTION" if started_runtime else "EXECUTOR_START_FAILED"
             )
             error_message = str(exc)
         finally:
             if stream is not None:
                 try:
                     await stream.aclose()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - stream trust boundary
                     stream_close_failure = exc
             close = getattr(self.runtime, "aclose", None)
-            if close is not None:
+            if self.owns_runtime and close is not None:
                 try:
                     await asyncio.shield(close())
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - cleanup trust boundary
                     cleanup_failure = exc
             self._active_task = None
 
@@ -291,7 +303,7 @@ class JobRunner:
             error_code = "EXECUTOR_CLEANUP_FAILED"
             error_message = str(cleanup_failure)
 
-        finished_at = datetime.now(timezone.utc)
+        finished_at = datetime.now(UTC)
         result = JobResult(
             job_id=request.job_id,
             attempt_id=request.attempt_id,
@@ -328,6 +340,6 @@ class JobRunner:
                 status=JobRunStatus.FAILED,
                 error_code="EVENT_SINK_FAILED",
                 error_message=self._redact_value(str(exc)),
-                finished_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(UTC),
             )
         return result

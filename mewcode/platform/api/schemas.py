@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mewcode.platform.persistence.orm import AttemptRow, JobRow
+from mewcode.platform.persistence.ports import ArtifactMetadata
 from mewcode.platform.persistence.repositories import StoredEvent
 
 
@@ -28,16 +29,13 @@ class RepositoryRequest(StrictModel):
     def safe_ref(cls, value: str) -> str:
         parts = value.split("/")
         if (
-            value.startswith("-")
+            value.startswith(("-", "/", "."))
             or value == "@"
             or ".." in value
             or "@{" in value
-            or value.startswith(("/", "."))
             or value.endswith(("/", ".", ".lock"))
             or any(
-                not part
-                or part.startswith(".")
-                or part.endswith((".", ".lock"))
+                not part or part.startswith(".") or part.endswith((".", ".lock"))
                 for part in parts
             )
             or any(char in value for char in "~^:?*[\\")
@@ -85,6 +83,16 @@ class ExecutionRequest(StrictModel):
         if len(names) != len(set(names)):
             raise ValueError("command names must be unique within each command list")
         return values
+
+    @model_validator(mode="after")
+    def command_timeout_budgets_are_bounded(self) -> ExecutionRequest:
+        if sum(item.timeout_seconds for item in self.setup_commands) > 600:
+            raise ValueError("setup command timeout budget must not exceed 600 seconds")
+        if sum(item.timeout_seconds for item in self.verification_commands) > 600:
+            raise ValueError(
+                "verification command timeout budget must not exceed 600 seconds"
+            )
+        return self
 
 
 class CreateJobRequest(StrictModel):
@@ -225,6 +233,32 @@ class EventPage(BaseModel):
     items: list[EventResponse]
     next_after: int
     has_more: bool
+
+
+class ArtifactResponse(BaseModel):
+    id: UUID
+    attempt_id: UUID | None
+    kind: str
+    sha256: str
+    size_bytes: int
+    content_type: str
+    created_at: datetime
+    expires_at: datetime
+
+    @classmethod
+    def from_metadata(cls, artifact: ArtifactMetadata) -> ArtifactResponse:
+        if artifact.created_at is None:
+            raise ValueError("Persisted Artifact is missing created_at")
+        return cls(
+            id=artifact.id,
+            attempt_id=artifact.attempt_id,
+            kind=artifact.kind,
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+            content_type=artifact.content_type,
+            created_at=artifact.created_at,
+            expires_at=artifact.expires_at,
+        )
 
 
 class HealthResponse(BaseModel):

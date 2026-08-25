@@ -190,6 +190,7 @@ class JobRow(Base):
         ),
         Index("ix_jobs_queue", "status", "created_at"),
         Index("ix_jobs_tenant_requester", "tenant_id", "requester_id"),
+        Index("ix_jobs_retention_until", "retention_until"),
     )
 
 
@@ -304,6 +305,17 @@ class ArtifactRow(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("storage_key"),
+        CheckConstraint(
+            "kind IN ('agent_log', 'command_log', 'diff', 'verification_report')",
+            name="kind_values",
+        ),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
+        CheckConstraint("size_bytes >= 0", name="size_non_negative"),
+        Index("ix_artifacts_expires_at", "expires_at"),
     )
 
 
