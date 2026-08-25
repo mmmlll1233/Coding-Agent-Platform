@@ -215,6 +215,8 @@ async def test_phase5_real_postgres_docker_and_github_gate(tmp_path: Path) -> No
             work_request=work,
             execution_contract=execution,
         )
+        if repair:
+            branches.append(f"mewcode/{job.id}")
         claimed = await repository.claim_attempt(
             worker_id=f"phase5-live-{job_id}",
             lease_seconds=300,
@@ -291,7 +293,6 @@ async def test_phase5_real_postgres_docker_and_github_gate(tmp_path: Path) -> No
         )
         assert _CANARY not in str([event.payload for event in events])
         branch = f"mewcode/{job.id}"
-        branches.append(branch)
         if repair:
             assert outcome.status == AttemptOutcomeStatus.COMPLETED
             assert scm.delivery is not None
