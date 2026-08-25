@@ -351,10 +351,10 @@ installation token、无 `.git` 归档、可信 manifest、Git Data API 发布�
 
 - 执行调用方 setup/verification commands、生成报告、失败修复循环和保留策略。
 
-交付状态（2026-08-25）：实现已完成。生产 Attempt Processor、最多两轮 Repair Round、
+交付状态（2026-08-25）：已完成并正式验收。生产 Attempt Processor、最多两轮 Repair Round、
 四类受信任 Artifact、fencing metadata、Requester 下载、保留 janitor、发布前清理闸门
-和 `PUBLISHING` 取消冲突均已落地。默认与 PostgreSQL 测试已纳入门禁；整体状态需在
-受保护 Phase 5 live gate及阶段 1–4 回归均通过后再标记为正式验收完成。交付说明见
+和 `PUBLISHING` 取消冲突均已落地。验收实现提交 `9757b70` 的常规跨平台门禁与受保护
+Phase 5 live gate均通过；Live Gate 证据为 GitHub Actions run `32843163043`。交付说明见
 `docs/platform/phase5-verification-artifacts.md`，证据边界见 ADR 0012。
 
 验收：任意一条 Verification 失败都不创建 PR；成功 PR包含完整且可追踪的 Verification 证据。

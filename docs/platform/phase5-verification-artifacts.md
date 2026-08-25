@@ -84,3 +84,6 @@ PostgreSQL 门禁覆盖 Artifact fencing 与 `PUBLISHING` 取消冲突。
 GitHub App，但 Runtime 使用确定性 Scripted Agent，不调用真实 LLM。它同时验证失败
 不创建分支/PR、Repair 后成功、重复发布幂等、PR 正文证据、secret canary 和 finally
 清理。真实 LLM 供应商仅作为部署 smoke test，不属于 CI。
+
+2026-08-25，验收实现提交 `9757b70` 的受保护 GitHub Actions run `32843163043` 通过；
+同一提交的常规跨平台 run `32843118872` 同时通过，Phase 5 正式验收完成。

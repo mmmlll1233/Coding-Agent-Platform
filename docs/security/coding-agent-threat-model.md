@@ -180,5 +180,7 @@ Docker Executor 安全与 Phase 5 Processor 门禁：7 passed
 ```
 
 平台生产镜像与 Compose 配置均已校验，所有 Docker 门禁结束后 Attempt container、
-network 和 volume 均为零残留。受保护 GitHub App 凭证不在本机测试范围内，
-`platform_phase5_live` 仍需在 `phase5-live` Environment 通过 `workflow_dispatch` 运行。
+network 和 volume 均为零残留。验收实现提交 `9757b70` 的常规 GitHub Actions run
+`32843118872` 与受保护 Phase 5 Live Gate run `32843163043` 均通过。后者在
+`phase4-github-live` Environment 中使用真实 PostgreSQL、Docker 和 GitHub App，验证
+失败无分支/PR、一次 Repair 后成功、重复发布幂等、证据脱敏以及 finally 资源清理。
