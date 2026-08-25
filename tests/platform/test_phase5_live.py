@@ -118,7 +118,11 @@ async def test_phase5_real_postgres_docker_and_github_gate(tmp_path: Path) -> No
     repository_name = _required("MEWCODE_TEST_GITHUB_REPOSITORY")
     base_ref = os.environ.get("MEWCODE_TEST_GITHUB_BASE_REF", "main")
     migration_settings = PlatformSettings(database_url=database_url)
-    command.upgrade(_alembic_config(migration_settings), "head")
+    await asyncio.to_thread(
+        command.upgrade,
+        _alembic_config(migration_settings),
+        "head",
+    )
     database = create_database(migration_settings)
     repository = PlatformRepository(database)
     cleanup_client = GitHubAppClient(
