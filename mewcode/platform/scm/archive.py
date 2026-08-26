@@ -15,6 +15,9 @@ from .errors import NoChangesError, ScmPolicyError
 
 
 GIB = 1024**3
+MIB = 1024**2
+MAX_REPOSITORY_CONTENT_BYTES = 2 * GIB
+MAX_REPOSITORY_DOWNLOAD_BYTES = 2304 * MIB
 LFS_POINTER = b"version https://git-lfs.github.com/spec/v1"
 
 
@@ -151,7 +154,7 @@ def normalize_source_archive(
     *,
     base_sha: str,
     base_tree_sha: str,
-    max_unpacked_bytes: int = 3 * GIB,
+    max_unpacked_bytes: int = MAX_REPOSITORY_CONTENT_BYTES,
     max_members: int = 300_000,
 ) -> dict[str, ManifestEntry]:
     entries: dict[str, ManifestEntry] = {}
@@ -213,6 +216,11 @@ def normalize_source_archive(
             if member.issym():
                 _safe_symlink(path, member.linkname)
                 target = member.linkname.encode("utf-8")
+                total += len(target)
+                if total > max_unpacked_bytes:
+                    raise ScmPolicyError(
+                        "Repository content exceeds configured capacity"
+                    )
                 output.addfile(cloned)
                 entries[path] = ManifestEntry(
                     kind="symlink",
@@ -226,7 +234,7 @@ def normalize_source_archive(
                 raise ScmPolicyError(f"Unsupported repository entry: {path}")
             total += max(0, member.size)
             if total > max_unpacked_bytes:
-                raise ScmPolicyError("Repository archive exceeds workspace capacity")
+                raise ScmPolicyError("Repository content exceeds configured capacity")
             extracted = source.extractfile(member)
             if extracted is None:
                 raise ScmPolicyError(f"Repository file cannot be read: {path}")

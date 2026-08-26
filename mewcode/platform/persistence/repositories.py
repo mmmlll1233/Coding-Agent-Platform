@@ -38,9 +38,15 @@ from .orm import (
     TenantRow,
     WorkerNodeRow,
 )
-from .ports import ArtifactMetadata, ClaimedNotification, NotificationOutboxStats
+from .ports import (
+    ArtifactMetadata,
+    ClaimedNotification,
+    JobQueueStats,
+    NotificationOutboxStats,
+)
 
 CLAIM_ADVISORY_LOCK = 5_251_903_303
+WORKER_REGISTRATION_ADVISORY_LOCK = 5_251_903_304
 
 NOTIFICATION_EVENT_TYPES = {
     "job_received": "JOB_ACCEPTED",
@@ -801,11 +807,86 @@ class PlatformRepository:
         return await self.get_job(principal=principal, job_id=job_id)
 
     async def register_worker(
-        self, worker_id: str, metadata: dict[str, Any] | None = None
+        self,
+        worker_id: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stale_seconds: int = 45,
     ) -> None:
-        await self.register_service(
-            service_id=worker_id, service_type="worker", metadata=metadata
+        worker_metadata = dict(metadata or {})
+        capacity = worker_metadata.get(
+            "global_capacity", worker_metadata.get("max_concurrent_jobs", 1)
         )
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
+            raise ValueError("Worker metadata must declare a positive global_capacity")
+        worker_metadata["global_capacity"] = capacity
+        worker_metadata.setdefault("draining", False)
+
+        async with self.database.sessions.begin() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": WORKER_REGISTRATION_ADVISORY_LOCK},
+            )
+            now = await self._database_now(session)
+            existing = await session.get(WorkerNodeRow, worker_id, with_for_update=True)
+            if existing is not None:
+                if existing.service_type != "worker":
+                    raise StateConflict(
+                        "Service ID is already registered for another service type",
+                        code="SERVICE_TYPE_CONFLICT",
+                    )
+                existing_capacity = existing.metadata_json.get(
+                    "global_capacity",
+                    existing.metadata_json.get("max_concurrent_jobs"),
+                )
+                existing_is_active = (
+                    existing.heartbeat_at >= now - timedelta(seconds=stale_seconds)
+                    and not bool(existing.metadata_json.get("draining"))
+                )
+                if (
+                    existing_is_active
+                    and existing_capacity is not None
+                    and existing_capacity != capacity
+                ):
+                    raise StateConflict(
+                        "Active Worker registration changed global platform capacity",
+                        code="CAPACITY_CONFIGURATION_MISMATCH",
+                    )
+            active_workers = (
+                await session.scalars(
+                    select(WorkerNodeRow)
+                    .where(
+                        WorkerNodeRow.service_type == "worker",
+                        WorkerNodeRow.id != worker_id,
+                        WorkerNodeRow.heartbeat_at
+                        >= now - timedelta(seconds=stale_seconds),
+                    )
+                    .with_for_update()
+                )
+            ).all()
+            for active in active_workers:
+                active_capacity = active.metadata_json.get(
+                    "global_capacity",
+                    active.metadata_json.get("max_concurrent_jobs"),
+                )
+                if active_capacity is not None and active_capacity != capacity:
+                    raise StateConflict(
+                        "Active Workers disagree on the global platform capacity",
+                        code="CAPACITY_CONFIGURATION_MISMATCH",
+                    )
+
+            if existing is None:
+                session.add(
+                    WorkerNodeRow(
+                        id=worker_id,
+                        service_type="worker",
+                        metadata_json=worker_metadata,
+                    )
+                )
+            else:
+                existing.started_at = now
+                existing.heartbeat_at = now
+                existing.metadata_json = worker_metadata
 
     async def register_service(
         self,
@@ -839,6 +920,17 @@ class PlatformRepository:
     async def heartbeat_worker(self, worker_id: str) -> bool:
         return await self.heartbeat_service(service_id=worker_id, service_type="worker")
 
+    async def set_worker_draining(self, worker_id: str, draining: bool) -> bool:
+        async with self.database.sessions.begin() as session:
+            worker = await session.get(WorkerNodeRow, worker_id, with_for_update=True)
+            if worker is None or worker.service_type != "worker":
+                return False
+            metadata = dict(worker.metadata_json)
+            metadata["draining"] = draining
+            worker.metadata_json = metadata
+            worker.heartbeat_at = await self._database_now(session)
+            return True
+
     async def heartbeat_service(self, *, service_id: str, service_type: str) -> bool:
         async with self.database.sessions.begin() as session:
             result = await session.execute(
@@ -852,9 +944,18 @@ class PlatformRepository:
             return result.rowcount == 1
 
     async def has_fresh_worker(self, stale_seconds: int) -> bool:
-        return await self.has_fresh_service(
-            service_type="worker", stale_seconds=stale_seconds
-        )
+        async with self.database.sessions() as session:
+            now = await self._database_now(session)
+            workers = (
+                await session.scalars(
+                    select(WorkerNodeRow).where(
+                        WorkerNodeRow.service_type == "worker",
+                        WorkerNodeRow.heartbeat_at
+                        >= now - timedelta(seconds=stale_seconds),
+                    )
+                )
+            ).all()
+            return any(not bool(worker.metadata_json.get("draining")) for worker in workers)
 
     async def has_fresh_service(self, *, service_type: str, stale_seconds: int) -> bool:
         async with self.database.sessions() as session:
@@ -1005,6 +1106,35 @@ class PlatformRepository:
                 in_flight=counts.get("IN_FLIGHT", 0),
                 delivered=counts.get("DELIVERED", 0),
                 oldest_pending_seconds=oldest_seconds,
+            )
+
+    async def job_queue_stats(self) -> JobQueueStats:
+        async with self.database.sessions() as session:
+            now = await self._database_now(session)
+            counts = {
+                status: int(count)
+                for status, count in (
+                    await session.execute(
+                        select(AttemptRow.status, func.count(AttemptRow.id))
+                        .join(JobRow, JobRow.id == AttemptRow.job_id)
+                        .where(AttemptRow.attempt_no == JobRow.current_attempt_no)
+                        .group_by(AttemptRow.status)
+                    )
+                ).all()
+            }
+            oldest = await session.scalar(
+                select(func.min(AttemptRow.queued_at))
+                .join(JobRow, JobRow.id == AttemptRow.job_id)
+                .where(
+                    AttemptRow.status == AttemptStatus.QUEUED.value,
+                    AttemptRow.attempt_no == JobRow.current_attempt_no,
+                )
+            )
+            oldest_seconds = max(0.0, (now - oldest).total_seconds()) if oldest else 0.0
+            return JobQueueStats(
+                queued=counts.get(AttemptStatus.QUEUED.value, 0),
+                running=counts.get(AttemptStatus.RUNNING.value, 0),
+                oldest_queued_seconds=oldest_seconds,
             )
 
     async def claim_attempt(

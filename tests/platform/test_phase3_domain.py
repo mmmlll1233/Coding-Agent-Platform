@@ -90,7 +90,51 @@ def test_platform_settings_use_only_explicit_environment() -> None:
     assert settings.lease_seconds == 60
     assert settings.heartbeat_seconds == 15
     assert settings.max_concurrent_jobs == 1
+    assert settings.worker_max_concurrent_attempts == 1
+    assert settings.attempt_timeout_seconds == 3600
+    assert settings.worker_shutdown_grace_seconds == 300
     assert settings.async_database_url == "postgresql+asyncpg://db/platform"
+
+
+def test_platform_settings_separate_global_and_worker_capacity() -> None:
+    settings = PlatformSettings.from_env(
+        {
+            "MEWCODE_PLATFORM_DATABASE_URL": "postgresql://db/platform",
+            "MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS": "5",
+            "MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS": "2",
+            "MEWCODE_PLATFORM_ATTEMPT_TIMEOUT_SECONDS": "30",
+            "MEWCODE_PLATFORM_WORKER_SHUTDOWN_GRACE_SECONDS": "10",
+        }
+    )
+    assert settings.max_concurrent_jobs == 5
+    assert settings.worker_max_concurrent_attempts == 2
+    assert settings.attempt_timeout_seconds == 30
+    assert settings.worker_shutdown_grace_seconds == 10
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("MEWCODE_PLATFORM_ATTEMPT_TIMEOUT_SECONDS", "3601"),
+        ("MEWCODE_PLATFORM_WORKER_SHUTDOWN_GRACE_SECONDS", "3601"),
+    ],
+)
+def test_platform_settings_bound_phase7_deadlines(name: str, value: str) -> None:
+    with pytest.raises(PlatformSettingsError):
+        PlatformSettings.from_env(
+            {"MEWCODE_PLATFORM_DATABASE_URL": "postgresql://db/platform", name: value}
+        )
+
+
+def test_worker_capacity_cannot_exceed_global_capacity() -> None:
+    with pytest.raises(PlatformSettingsError, match="must not exceed"):
+        PlatformSettings.from_env(
+            {
+                "MEWCODE_PLATFORM_DATABASE_URL": "postgresql://db/platform",
+                "MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS": "1",
+                "MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS": "2",
+            }
+        )
 
 
 @pytest.mark.parametrize(

@@ -529,7 +529,7 @@ def test_archive_rejects_traversal_links_type_conflicts_and_bombs(
             base_tree_sha=TREE_SHA,
         )
 
-    with pytest.raises(ScmPolicyError, match="workspace capacity"):
+    with pytest.raises(ScmPolicyError, match="configured capacity"):
         normalize_source_archive(
             _tar(tmp_path / "bomb.tar", {"large": b"x" * 33}, prefix="root"),
             tmp_path / "bomb-out.tar",
@@ -537,6 +537,39 @@ def test_archive_rejects_traversal_links_type_conflicts_and_bombs(
             base_sha=BASE_SHA,
             base_tree_sha=TREE_SHA,
             max_unpacked_bytes=32,
+        )
+
+
+def test_repository_content_capacity_counts_files_and_symlink_targets(
+    tmp_path: Path,
+) -> None:
+    root = tarfile.TarInfo("root")
+    root.type = tarfile.DIRTYPE
+    file_member = tarfile.TarInfo("root/file")
+    file_member.size = 4
+    link = tarfile.TarInfo("root/link")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "file"
+    source = _tar_members(
+        tmp_path / "content-limit.tar",
+        [(root, None), (file_member, b"data"), (link, None)],
+    )
+    normalize_source_archive(
+        source,
+        tmp_path / "content-limit-out.tar",
+        tmp_path / "content-limit.json",
+        base_sha=BASE_SHA,
+        base_tree_sha=TREE_SHA,
+        max_unpacked_bytes=8,
+    )
+    with pytest.raises(ScmPolicyError, match="configured capacity"):
+        normalize_source_archive(
+            source,
+            tmp_path / "content-limit-rejected.tar",
+            tmp_path / "content-limit-rejected.json",
+            base_sha=BASE_SHA,
+            base_tree_sha=TREE_SHA,
+            max_unpacked_bytes=7,
         )
 
 

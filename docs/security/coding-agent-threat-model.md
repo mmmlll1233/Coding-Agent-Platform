@@ -49,7 +49,7 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 | `CRED-002` | 模型或工具把已观察到的敏感值写入日志、Event、Artifact 或 diff | 所有出口统一 redaction；发现 canary 时 Attempt 失败并报警 | `secret_canary` | Phase 3/5/6 |
 | `FS-001` | 使用 `..`、绝对路径、`~` 或 symlink 访问 workspace 外文件 | 统一路径边界和最小挂载；越界操作被拒绝 | `workspace_escape` | Phase 2 |
 | `PROC-001` | 超时命令派生子孙进程，取消 coroutine 后继续运行 | kill 进程组并销毁容器；发现残留时 Attempt 失败 | `timeout_process_tree` | Phase 1/2 |
-| `RES-001` | 持续写文件耗尽 Attempt 或宿主磁盘 | Attempt Workspace 的 size/inode 限制，写满只影响当前 Attempt | `disk_exhaustion` | Phase 2/7 |
+| `RES-001` | 持续写文件、归档展开或大仓库耗尽 Attempt 或宿主磁盘 | 2GiB Repository Size、2.25GiB下载和Attempt Workspace size/inode限制；写满只影响当前 Attempt | `disk_exhaustion`、Repository Size边界门禁 | Phase 2/7 |
 | `RES-002` | fork/spawn 大量进程耗尽 PID | 容器 PID 限制和终态清理 | `pid_exhaustion` | Phase 2/7 |
 | `NET-001` | 访问环回、RFC1918、云元数据、宿主服务或任意公网 | Executor 只能经过 egress proxy 访问平台白名单 | `egress_probe` | Phase 2/7 |
 | `SCM-001` | Agent 命令读取或复用 GitHub installation token | token 只存在于 SCM Adapter，Executor 的 Git remote 不含凭证 | `secret_canary` 加 SCM 集成测试 | Phase 4 |
@@ -63,6 +63,8 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 | `RACE-001` | 取消与发布并发导致 CANCELLED Job 遗留 PR | Artifact/清理完成后事务切换 PUBLISHING；该阶段拒绝取消 | PostgreSQL 行锁竞态测试 | Phase 5 |
 | `EVT-001` | 内存事件丢失、乱序或跨 Job 混合 | 持久化前绑定 job/attempt/sequence，SSE 只投影持久化事件 | JobEvent/恢复测试 | Phase 3 |
 | `AVAIL-001` | LLM、GitHub、飞书或 Worker 崩溃造成重复任务或重复 PR | 租约、幂等键、Outbox 和幂等 SCM 发布 | 崩溃与重复投递测试 | Phase 3/4/6/7 |
+| `CAP-001` | 多 Worker容量值不一致造成超卖或吞吐不确定 | PostgreSQL强制全局Platform Capacity；活跃Worker注册必须一致，本地Slot独立受限 | PostgreSQL容量漂移、5并发屏障和第6个排队测试 | Phase 7 |
+| `OPS-001` | 备份与Artifact不一致、恢复覆盖现有数据或把凭证写入证据 | 停机一致备份、活动Attempt拒绝、manifest哈希、空目标恢复、证据字段/凭证扫描 | Phase 7 ops与gate测试、空环境恢复演练 | Phase 7 |
 
 ## 6. Phase 0 测试策略
 
@@ -214,3 +216,14 @@ Docker Compose config：通过
 checkout完整 SHA `ab2d15c090d22cba88fc87593d946f00cd73145d`，使用真实 PostgreSQL和
 测试飞书群验证 Notification Lease恢复、第二次 Delivery Attempt成功和 secret不进入
 Outbox可观察字段。两项测试飞书 Environment secret在run结束后已删除。
+
+## 15. Phase 7 实现与待验收记录
+
+`RES-001`、`AVAIL-001`、`CAP-001` 和 `OPS-001` 的无凭证部分已加入自动化覆盖：
+规范化 Repository Size含symlink目标并按2GiB fail closed；Attempt Processor和Executor
+共享最大3600秒配置；Worker Drain、容量漂移拒绝、全局领取上限、5并发屏障/第6个排队、
+备份摘要校验和验收证据凭证扫描均有测试。现有恶意仓库夹具继续作为安全清单，不得删除。
+
+正式本地安全结论仍为待验收：实际2GiB I/O、真实3600秒、连续20个 Job、两次真实飞书、
+PR发布后崩溃对账及空环境恢复必须在同一固定实现 SHA上完成。任何原始 secret、webhook、
+请求/响应体或日志不得进入提交的证据；服务器5并发在迁移前保持 `PENDING`。

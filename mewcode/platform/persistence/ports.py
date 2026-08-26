@@ -55,6 +55,13 @@ class NotificationOutboxStats:
     oldest_pending_seconds: float
 
 
+@dataclass(frozen=True)
+class JobQueueStats:
+    queued: int
+    running: int
+    oldest_queued_seconds: float
+
+
 class NotificationOutboxRepository(Protocol):
     async def enqueue(self, message: NotificationMessage) -> None: ...
 

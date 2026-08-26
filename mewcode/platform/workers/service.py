@@ -46,20 +46,56 @@ class WorkerService:
             f"{socket.gethostname()}-{uuid4().hex[:12]}"
         )
         self._stop = asyncio.Event()
+        self._heartbeat_stop = asyncio.Event()
+        self._stopped = asyncio.Event()
+        self._draining = False
         self._active: set[asyncio.Task[None]] = set()
 
     async def stop(self) -> None:
+        if self._stopped.is_set():
+            return
+        await self._begin_drain()
         self._stop.set()
-        if self._active:
+        await self._stopped.wait()
+
+    async def _begin_drain(self) -> None:
+        if self._draining:
+            return
+        self._draining = True
+        if self.metrics is not None:
+            self.metrics.draining.set(1)
+        try:
+            if not await self.repository.set_worker_draining(self.worker_id, True):
+                log.warning("Worker registration disappeared before drain")
+        except Exception:
+            log.exception("Failed to publish Worker drain state")
+
+    async def _drain_active(self) -> bool:
+        if not self._active:
+            return True
+        try:
+            async with asyncio.timeout(
+                self.settings.worker_shutdown_grace_seconds
+            ):
+                await asyncio.gather(*tuple(self._active), return_exceptions=True)
+            return True
+        except TimeoutError:
+            log.warning(
+                "Worker drain grace expired active_attempts=%s",
+                len(self._active),
+            )
+            for task in tuple(self._active):
+                task.cancel()
             await asyncio.gather(*tuple(self._active), return_exceptions=True)
+            return False
 
     async def _worker_heartbeat_loop(self) -> None:
-        while not self._stop.is_set():
+        while not self._heartbeat_stop.is_set():
             if not await self.repository.heartbeat_worker(self.worker_id):
                 raise RuntimeError("Worker registration disappeared")
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self.settings.heartbeat_seconds
+                    self._heartbeat_stop.wait(), timeout=self.settings.heartbeat_seconds
                 )
             except TimeoutError:
                 continue
@@ -278,6 +314,13 @@ class WorkerService:
 
         task.add_done_callback(finished)
 
+    async def _refresh_queue_metrics(self) -> None:
+        if self.metrics is None:
+            return
+        stats = await self.repository.job_queue_stats()
+        self.metrics.queued_jobs.set(stats.queued)
+        self.metrics.oldest_queued.set(stats.oldest_queued_seconds)
+
     async def run_forever(self) -> None:
         if self.processor_factory is None:
             raise RuntimeError(
@@ -285,8 +328,21 @@ class WorkerService:
             )
         await self.repository.register_worker(
             self.worker_id,
-            metadata={"max_concurrent_jobs": self.settings.max_concurrent_jobs},
+            metadata={
+                "global_capacity": self.settings.max_concurrent_jobs,
+                "local_slots": self.settings.worker_max_concurrent_attempts,
+                "draining": False,
+            },
+            stale_seconds=self.settings.worker_stale_seconds,
         )
+        if self.metrics is not None:
+            self.metrics.capacity.labels("platform").set(
+                self.settings.max_concurrent_jobs
+            )
+            self.metrics.capacity.labels("worker").set(
+                self.settings.worker_max_concurrent_attempts
+            )
+            self.metrics.draining.set(0)
         heartbeat = asyncio.create_task(
             self._worker_heartbeat_loop(), name="worker-heartbeat"
         )
@@ -300,7 +356,11 @@ class WorkerService:
                         raise RuntimeError(
                             f"Worker background task stopped: {background.get_name()}"
                         ) from error
-                while len(self._active) < self.settings.max_concurrent_jobs:
+                await self._refresh_queue_metrics()
+                while (
+                    len(self._active)
+                    < self.settings.worker_max_concurrent_attempts
+                ):
                     claimed = await self.repository.claim_attempt(
                         worker_id=self.worker_id,
                         lease_seconds=self.settings.lease_seconds,
@@ -318,12 +378,18 @@ class WorkerService:
                 except TimeoutError:
                     continue
         finally:
+            await self._begin_drain()
             self._stop.set()
-            heartbeat.cancel()
             recovery.cancel()
             janitor.cancel()
-            await asyncio.gather(heartbeat, recovery, janitor, return_exceptions=True)
-            if self._active:
-                for task in tuple(self._active):
-                    task.cancel()
-                await asyncio.gather(*tuple(self._active), return_exceptions=True)
+            await asyncio.gather(recovery, janitor, return_exceptions=True)
+            drained = await self._drain_active()
+            if self.metrics is not None:
+                self.metrics.shutdowns.labels(
+                    "normal" if drained else "forced"
+                ).inc()
+                self.metrics.active_attempts.set(0)
+            self._heartbeat_stop.set()
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            self._stopped.set()

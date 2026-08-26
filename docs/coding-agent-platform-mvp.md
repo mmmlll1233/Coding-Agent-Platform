@@ -11,7 +11,7 @@ MVP 面向内部单租户调用方，把一个结构化 Work Request 异步执�
 - 自动分析、修改和验证；所有调用方声明的验证命令成功后才创建 Draft PR。
 - 无法安全继续时进入 `NEEDS_INPUT`；不可恢复失败进入 `FAILED`；平台不自动合并 PR。
 - 首版只监听本机 `127.0.0.1`，使用 API Key 认证。
-- 本地 MVP 同时只运行 1 个 Job、单仓库不超过 2 GB、单 Job 最长 60 分钟、自动重试 1 次；迁移到服务器并完成压测后再把目标提高到 5 个并发 Job。
+- 本地 MVP 的 Platform Capacity 为1、规范化 Repository Size不超过2GiB、每个 Attempt活动处理最长60分钟、Worker Lease过期自动恢复1次；迁移到服务器并完成压测后再把目标提高到5个并发 Attempt。
 - 支持普通 Git 仓库，不支持 Git LFS、submodule、跨仓库修改或 `.github/workflows/**` 修改。
 - Executor Container 只允许访问批准的公共依赖源；GitHub、LLM 和飞书凭证不进入 Executor。
 - Job 元数据和事件保留 30 天，失败日志、diff 和测试报告保留 7 天，临时工作区终态后销毁。
@@ -378,8 +378,16 @@ Notifier尚未确认时崩溃的重复窗口符合记录的at-least-once语义�
 
 ### Phase 7：端到端硬化（4～6 天）
 
-- 本地先完成单并发下的 2 GB仓库边界、60 分钟 deadline、Worker 崩溃、重复 API/通知/PR测试；迁移到服务器后再执行 5 并发压测。
+- 本地先完成单并发下的2GiB Repository Size边界、每 Attempt 60分钟 deadline、Worker崩溃、重复 API/通知/PR测试；迁移到服务器后再执行5并发压测。
 - 编写本地 Compose 运维手册、备份恢复和故障排查说明。
+
+交付状态（2026-08-26）：实现已完成，正式本地验收待运行。Platform Capacity与
+Worker Slot已分离并带活跃 Worker一致性检查；每 Attempt可配置且最大3600秒 deadline、
+5分钟 Worker Drain、2GiB规范化 Repository Size、2.25GiB下载防护、排队/容量指标、
+停机一致备份/空环境恢复脚本、真实2GiB门禁和 fail-closed验收证据验证器均已落地。
+运行与验收说明见 `docs/platform/phase7-end-to-end-hardening.md`，本地运维见
+`docs/platform/phase7-local-operations.md`，容量取舍见 ADR 0014。正式20-Job混合负载、
+真实3600秒和备份恢复演练尚未执行；服务器5并发明确保持 `PENDING`。
 
 验收：达到已约定的 MVP 容量基线，并通过安全测试清单。
 
@@ -401,7 +409,7 @@ Notifier尚未确认时崩溃的重复窗口符合记录的at-least-once语义�
 
 - 连续 20 个试点 Job 无任务丢失、重复 PR或凭证泄漏。
 - Worker/API重启测试通过，失败 Job 可以获取 diff、日志和Verification报告。
-- 本地单并发下资源限制和 60 分钟 deadline 生效且无残留容器；迁移服务器前补充通过 5 并发压测。
+- 本地单并发下资源限制和每 Attempt 60分钟 deadline生效且无残留容器；迁移服务器前补充通过5并发压测。
 - 所有 PR均来自固定 SHA，且所有声明的 Verification 命令成功。
 - 飞书故障可重试，通知不影响 Job 终态。
 - 恶意仓库样例不能访问宿主、Docker socket、GitHub token、LLM key或飞书 webhook。

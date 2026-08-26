@@ -18,7 +18,8 @@ from mewcode.platform.domain import (
 )
 
 from .archive import (
-    GIB,
+    MAX_REPOSITORY_CONTENT_BYTES,
+    MAX_REPOSITORY_DOWNLOAD_BYTES,
     diff_manifests,
     load_manifest,
     normalize_source_archive,
@@ -43,11 +44,15 @@ class GitHubScmAdapter:
         max_delivery_files: int = 200,
         max_delivery_bytes: int = 20 * 1024 * 1024,
         max_delivery_file_bytes: int = 5 * 1024 * 1024,
+        max_repository_bytes: int = MAX_REPOSITORY_CONTENT_BYTES,
+        max_download_bytes: int = MAX_REPOSITORY_DOWNLOAD_BYTES,
     ) -> None:
         self.client = client
         self.max_delivery_files = max_delivery_files
         self.max_delivery_bytes = max_delivery_bytes
         self.max_delivery_file_bytes = max_delivery_file_bytes
+        self.max_repository_bytes = max_repository_bytes
+        self.max_download_bytes = max_download_bytes
 
     @staticmethod
     def _repo_path(target: RepositoryTarget) -> str:
@@ -146,7 +151,7 @@ class GitHubScmAdapter:
                 revision=target.base_sha,
                 token=token,
                 destination=raw_archive,
-                max_bytes=2 * GIB,
+                max_bytes=self.max_download_bytes,
             )
             try:
                 try:
@@ -156,6 +161,7 @@ class GitHubScmAdapter:
                         manifest_path,
                         base_sha=target.base_sha,
                         base_tree_sha=base_tree_sha,
+                        max_unpacked_bytes=self.max_repository_bytes,
                     )
                 except Exception:
                     workspace_archive.unlink(missing_ok=True)

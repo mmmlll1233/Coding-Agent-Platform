@@ -285,6 +285,58 @@ async def test_database_capacity_and_fencing_are_enforced(database) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_registration_rejects_global_capacity_drift_and_draining(
+    database,
+) -> None:
+    repository = PlatformRepository(database)
+    await repository.register_worker(
+        "worker-capacity-a",
+        metadata={"global_capacity": 1, "local_slots": 1, "draining": False},
+        stale_seconds=30,
+    )
+    assert await repository.has_fresh_worker(30)
+    with pytest.raises(StateConflict) as same_id:
+        await repository.register_worker(
+            "worker-capacity-a",
+            metadata={"global_capacity": 5, "local_slots": 1, "draining": False},
+            stale_seconds=30,
+        )
+    assert same_id.value.code == "CAPACITY_CONFIGURATION_MISMATCH"
+    with pytest.raises(StateConflict) as caught:
+        await repository.register_worker(
+            "worker-capacity-b",
+            metadata={"global_capacity": 5, "local_slots": 1, "draining": False},
+            stale_seconds=30,
+        )
+    assert caught.value.code == "CAPACITY_CONFIGURATION_MISMATCH"
+    assert await repository.set_worker_draining("worker-capacity-a", True)
+    assert not await repository.has_fresh_worker(30)
+
+
+@pytest.mark.asyncio
+async def test_global_capacity_allows_multiple_workers_without_oversubscription(
+    database,
+) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "phase7-capacity")
+    for key in ("capacity-one", "capacity-two", "capacity-three"):
+        await _create(repository, principal, key)
+    first = await repository.claim_attempt(
+        worker_id="worker-a", lease_seconds=60, max_concurrent_jobs=2
+    )
+    second = await repository.claim_attempt(
+        worker_id="worker-b", lease_seconds=60, max_concurrent_jobs=2
+    )
+    blocked = await repository.claim_attempt(
+        worker_id="worker-c", lease_seconds=60, max_concurrent_jobs=2
+    )
+    assert first is not None and second is not None
+    assert blocked is None
+    stats = await repository.job_queue_stats()
+    assert (stats.queued, stats.running) == (1, 2)
+
+
+@pytest.mark.asyncio
 async def test_expired_lease_retries_once_and_rejects_stale_events(database) -> None:
     repository = PlatformRepository(database)
     _, principal = await _principal(repository)
@@ -1025,6 +1077,43 @@ class _CancellingFactory:
         return _CancellingProcessor(self.started, self.cancelled)
 
 
+class _BarrierProcessor:
+    def __init__(self, factory, lease: AttemptLease) -> None:
+        self.factory = factory
+        self.lease = lease
+
+    async def process(
+        self, lease: AttemptLease, controls: AttemptControls
+    ) -> AttemptOutcome:
+        self.factory.started.append(lease.attempt_id)
+        if len(self.factory.started) >= self.factory.expected_concurrency:
+            self.factory.capacity_reached.set()
+        await self.factory.release.wait()
+        pr_number = (lease.job_id.int % 10_000) + 1
+        return AttemptOutcome(
+            status=AttemptOutcomeStatus.COMPLETED,
+            pr_number=pr_number,
+            pr_url=f"https://github.com/company/service/pull/{pr_number}",
+            head_branch=f"mewcode/{lease.job_id}",
+            head_sha="f" * 40,
+            verification_succeeded=True,
+        )
+
+    async def cancel(self) -> None:
+        self.factory.release.set()
+
+
+class _BarrierFactory:
+    def __init__(self, expected_concurrency: int) -> None:
+        self.expected_concurrency = expected_concurrency
+        self.started: list[UUID] = []
+        self.capacity_reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def create(self, lease: AttemptLease) -> _BarrierProcessor:
+        return _BarrierProcessor(self, lease)
+
+
 @pytest.mark.asyncio
 async def test_worker_observes_cancel_and_finishes_cleanup(
     database, postgres_settings
@@ -1055,5 +1144,78 @@ async def test_worker_observes_cancel_and_finishes_cleanup(
         assert current.status == JobStatus.CANCELLED.value
         assert factory.cancelled.is_set()
     finally:
+        await service.stop()
+        await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_worker_shutdown_drains_then_forces_lease_recovery(
+    database, postgres_settings
+) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "worker-drain")
+    job, _ = await _create(repository, principal, "worker-drain")
+    factory = _CancellingFactory()
+    settings = replace(
+        postgres_settings,
+        worker_id="worker-drain-service",
+        heartbeat_seconds=1,
+        lease_seconds=5,
+        recovery_seconds=1,
+        worker_shutdown_grace_seconds=1,
+    )
+    service = WorkerService(settings, repository, factory)
+    task = asyncio.create_task(service.run_forever())
+    await asyncio.wait_for(factory.started.wait(), timeout=5)
+    await asyncio.wait_for(service.stop(), timeout=4)
+    await asyncio.wait_for(task, timeout=2)
+    assert factory.cancelled.is_set()
+    assert not await repository.has_fresh_worker(30)
+    current = await repository.get_job(principal=principal, job_id=job.id)
+    assert current.status == JobStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_server_gate_holds_five_slots_and_queues_the_sixth(
+    database, postgres_settings
+) -> None:
+    repository = PlatformRepository(database)
+    _, principal = await _principal(repository, "phase7-server-gate")
+    jobs = [
+        (await _create(repository, principal, f"phase7-server-{index}"))[0]
+        for index in range(10)
+    ]
+    factory = _BarrierFactory(expected_concurrency=5)
+    settings = replace(
+        postgres_settings,
+        worker_id="phase7-five-slot-worker",
+        max_concurrent_jobs=5,
+        worker_max_concurrent_attempts=5,
+        heartbeat_seconds=1,
+        lease_seconds=5,
+        recovery_seconds=1,
+    )
+    service = WorkerService(settings, repository, factory)
+    task = asyncio.create_task(service.run_forever())
+    try:
+        await asyncio.wait_for(factory.capacity_reached.wait(), timeout=5)
+        stats = await repository.job_queue_stats()
+        assert stats.running == 5
+        assert stats.queued == 5
+        await asyncio.sleep(0.6)
+        assert len(factory.started) == 5
+        factory.release.set()
+        for _ in range(100):
+            states = [
+                (await repository.get_job(principal=principal, job_id=job.id)).status
+                for job in jobs
+            ]
+            if states == [JobStatus.SUCCEEDED.value] * 10:
+                break
+            await asyncio.sleep(0.1)
+        assert states == [JobStatus.SUCCEEDED.value] * 10
+        assert len(factory.started) == 10
+    finally:
+        factory.release.set()
         await service.stop()
         await asyncio.wait_for(task, timeout=5)

@@ -20,6 +20,18 @@ _Avoid_: Run, retry task
 The time-bounded right for one Worker to advance an Attempt; an expired lease cannot authorize later state changes.
 _Avoid_: Lock, ownership flag
 
+**Platform Capacity**:
+The maximum number of leased Attempts that may be active across all Workers at one time.
+_Avoid_: Worker concurrency, thread count
+
+**Worker Slot**:
+One unit of a Worker's local ability to execute an Attempt, bounded independently from Platform Capacity.
+_Avoid_: Platform Capacity, worker thread
+
+**Worker Drain**:
+A Worker condition that refuses new Attempts while preserving active Worker Leases until completion or a bounded shutdown grace expires.
+_Avoid_: Immediate shutdown, cancellation
+
 **Attempt Workspace**:
 The disposable isolated filesystem owned by exactly one Attempt; every retry receives a new one.
 _Avoid_: Job volume, shared workspace
@@ -31,6 +43,14 @@ _Avoid_: Repo info, source address
 **Prepared Repository**:
 A trusted, credential-free snapshot of a Repository Target together with the manifest needed to prove later Workspace changes.
 _Avoid_: Checkout, clone, working copy
+
+**Repository Size**:
+The total payload bytes of regular files and symbolic-link targets in a normalized Prepared Repository at its immutable base revision.
+_Avoid_: Git history size, compressed archive size, Workspace size
+
+**Attempt Deadline**:
+The maximum active processing time granted independently to one Attempt; queued time and time awaiting Requester input are outside it.
+_Avoid_: Job lifetime, command timeout
 
 **Requester**:
 An authenticated internal actor that submits a Work Request, supplies its Verification Contract, and answers requests for clarification.

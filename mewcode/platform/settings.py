@@ -40,6 +40,15 @@ def _non_negative_int(env: dict[str, str], name: str, default: int) -> int:
     return value
 
 
+def _bounded_positive_int(
+    env: dict[str, str], name: str, default: int, *, maximum: int
+) -> int:
+    value = _positive_int(env, name, default)
+    if value > maximum:
+        raise PlatformSettingsError(f"{name} must be <= {maximum}")
+    return value
+
+
 def _boolean(env: dict[str, str], name: str, default: bool = False) -> bool:
     raw = env.get(name, str(default)).strip().lower()
     if raw in {"1", "true", "yes", "on"}:
@@ -79,6 +88,9 @@ class PlatformSettings:
     recovery_seconds: int = 5
     worker_stale_seconds: int = 45
     max_concurrent_jobs: int = 1
+    worker_max_concurrent_attempts: int = 1
+    attempt_timeout_seconds: int = 3600
+    worker_shutdown_grace_seconds: int = 300
     sse_poll_milliseconds: int = 500
     sse_keepalive_seconds: int = 15
     worker_id: str = ""
@@ -164,6 +176,21 @@ class PlatformSettings:
             ),
             max_concurrent_jobs=_positive_int(
                 env, "MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS", 1
+            ),
+            worker_max_concurrent_attempts=_positive_int(
+                env, "MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS", 1
+            ),
+            attempt_timeout_seconds=_bounded_positive_int(
+                env,
+                "MEWCODE_PLATFORM_ATTEMPT_TIMEOUT_SECONDS",
+                3600,
+                maximum=3600,
+            ),
+            worker_shutdown_grace_seconds=_bounded_positive_int(
+                env,
+                "MEWCODE_PLATFORM_WORKER_SHUTDOWN_GRACE_SECONDS",
+                300,
+                maximum=3600,
             ),
             sse_poll_milliseconds=_positive_int(
                 env, "MEWCODE_PLATFORM_SSE_POLL_MILLISECONDS", 500
@@ -300,6 +327,11 @@ class PlatformSettings:
         ):
             raise PlatformSettingsError(
                 "MEWCODE_PLATFORM_NOTIFICATION_TIMEOUT_SECONDS must be less than the notification lease"
+            )
+        if settings.worker_max_concurrent_attempts > settings.max_concurrent_jobs:
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS must not exceed "
+                "MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS"
             )
         if not _NOTIFICATION_DESTINATION.fullmatch(settings.notification_destination):
             raise PlatformSettingsError(

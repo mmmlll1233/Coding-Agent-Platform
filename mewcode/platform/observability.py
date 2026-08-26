@@ -175,6 +175,33 @@ class WorkerMetrics:
             "Worker janitor failures",
             registry=self.registry,
         )
+        self.capacity = Gauge(
+            "mewcode_platform_worker_capacity",
+            "Configured platform and local Worker capacity",
+            ("scope",),
+            registry=self.registry,
+        )
+        self.draining = Gauge(
+            "mewcode_platform_worker_draining",
+            "Whether this Worker is draining",
+            registry=self.registry,
+        )
+        self.queued_jobs = Gauge(
+            "mewcode_platform_jobs_queued",
+            "Currently queued Jobs",
+            registry=self.registry,
+        )
+        self.oldest_queued = Gauge(
+            "mewcode_platform_oldest_queued_seconds",
+            "Age of the oldest queued Job",
+            registry=self.registry,
+        )
+        self.shutdowns = Counter(
+            "mewcode_platform_worker_shutdowns_total",
+            "Worker shutdown outcomes",
+            ("result",),
+            registry=self.registry,
+        )
 
 
 class NotifierMetrics:

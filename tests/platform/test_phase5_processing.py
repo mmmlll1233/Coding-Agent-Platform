@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 import tarfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -453,3 +453,66 @@ async def test_processor_blocks_publish_on_prerequisite_failure(
 
 async def _completed() -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_processor_attempt_deadline_is_configurable_and_preserves_artifacts(
+    tmp_path: Path,
+) -> None:
+    key_file = tmp_path / "llm-key"
+    key_file.write_text("phase7-llm-secret", encoding="utf-8")
+    events: list[str] = []
+    environment_box = {}
+
+    def environment_factory(spec):
+        environment = FakeExecutionEnvironment(spec)
+        environment_box["value"] = environment
+        return environment
+
+    class _BlockingAgent:
+        async def run(self, conversation):
+            await asyncio.Event().wait()
+            yield LoopComplete(1)
+
+    def runtime_factory(options):
+        runtime = _Runtime(options.execution_environment, redactor)
+        runtime.agent = _BlockingAgent()
+        return runtime
+
+    class _ArtifactService:
+        def __init__(self) -> None:
+            self.kinds: list[ArtifactKind] = []
+            self.contents: dict[ArtifactKind, bytes] = {}
+
+        async def persist_bytes(self, lease, *, kind, content, content_type):
+            self.kinds.append(kind)
+            self.contents[kind] = content
+            return await _Artifacts(environment_box["value"], events).persist_bytes(
+                lease, kind=kind, content=content, content_type=content_type
+            )
+
+    artifacts = _ArtifactService()
+    redactor = SensitiveValueRedactor(("phase7-llm-secret",))
+    settings = replace(
+        _settings(tmp_path, key_file), attempt_timeout_seconds=1
+    )
+    processor = ProductionAttemptProcessor(
+        settings,
+        SimpleNamespace(),  # type: ignore[arg-type]
+        artifacts,  # type: ignore[arg-type]
+        redactor,
+        scm=_Scm(_prepared(tmp_path), events),
+        environment_factory=environment_factory,
+        runtime_factory=runtime_factory,
+    )
+    outcome = await processor.process(
+        _lease(),
+        AttemptControls(InMemoryJobEventSink(), lambda stage: _completed(), asyncio.Event()),
+    )
+    assert outcome.status == AttemptOutcomeStatus.FAILED
+    assert outcome.error_code == "ATTEMPT_DEADLINE_EXCEEDED"
+    assert set(artifacts.kinds) == set(ArtifactKind)
+    report = json.loads(artifacts.contents[ArtifactKind.VERIFICATION_REPORT])
+    assert report["terminal"]["code"] == "ATTEMPT_DEADLINE_EXCEEDED"
+    assert environment_box["value"].close_count == 1
+    assert not environment_box["value"].spec.trusted_state_dir.exists()

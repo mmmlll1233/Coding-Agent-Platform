@@ -187,8 +187,10 @@ class ProductionAttemptProcessor:
             proxy_image=self.settings.proxy_image,
             trusted_state_dir=Path(self.settings.state_root),
             limits=ExecutionLimits(
-                command_timeout_seconds=600,
-                attempt_timeout_seconds=3600,
+                command_timeout_seconds=min(
+                    600, self.settings.attempt_timeout_seconds
+                ),
+                attempt_timeout_seconds=self.settings.attempt_timeout_seconds,
             ),
             egress_allowlist=self.settings.egress_allowlist,
         )
@@ -692,8 +694,12 @@ class ProductionAttemptProcessor:
         sink = _RecordingSink(controls.event_sink, self.redactor, per_log_limit)
         prepared: Any | None = None
         artifacts: dict[str, Any] = {}
+        attempt_deadline: asyncio.Timeout | None = None
+        deadline_cleanup_at: float | None = None
         try:
-            async with asyncio.timeout(3600):
+            async with asyncio.timeout(
+                self.settings.attempt_timeout_seconds
+            ) as attempt_deadline:
                 try:
                     prepared, _ = await self._execute(lease, controls, evidence, sink)
                 except _AttemptTerminal as terminal:
@@ -715,12 +721,20 @@ class ProductionAttemptProcessor:
                     if prepared is None:
                         prepared = evidence.prepared
                     evidence.agent_log = bytes(sink.buffer)
-                    try:
-                        await self._close_executor()
-                    except Exception as error:  # noqa: BLE001 - cleanup trust boundary
-                        evidence.terminal = _AttemptTerminal(
-                            "EXECUTOR_CLEANUP_FAILED", str(error)
-                        )
+                    if not attempt_deadline.expired():
+                        try:
+                            async with asyncio.timeout(30):
+                                await self._close_executor()
+                        except Exception as error:  # noqa: BLE001 - cleanup trust boundary
+                            evidence.terminal = _AttemptTerminal(
+                                "EXECUTOR_CLEANUP_FAILED", str(error)
+                            )
+
+                if attempt_deadline.expired():
+                    # A Runtime may translate Agent cancellation into a normal
+                    # CANCELLED result. Re-enter the single deadline cleanup path
+                    # instead of letting work continue without a timeout.
+                    raise TimeoutError
 
                 if evidence.workspace_archive is not None:
                     try:
@@ -767,30 +781,40 @@ class ProductionAttemptProcessor:
                     f"- `{item['command']}` ({item['name']}): passed"
                     for item in evidence.rounds[-1]["commands"]
                 ]
-                delivery = await self.scm.publish_verified(
-                    VerifiedDeliveryRequest(
-                        job_id=lease.job_id,
-                        prepared=prepared,
-                        workspace_archive_path=evidence.workspace_archive,
-                        work_title=str(
-                            lease.work_request.get("title", "MewCode change")
-                        ),
-                        work_summary=str(
-                            lease.work_request.get(
-                                "description", "Platform work request"
-                            )
-                        ),
-                        change_summary=(
-                            f"Changed {len(evidence.changed_paths)} deliverable path(s)."
-                        ),
-                        verification_summary=(
-                            "\n".join(verification_lines)
-                            + f"\nRepair rounds: {evidence.repair_rounds}"
-                            + f"\nJob ID: {lease.job_id}"
-                            + f"\nVerification report Artifact ID: {report_id}"
-                        ),
-                    )
+                delivery_request = VerifiedDeliveryRequest(
+                    job_id=lease.job_id,
+                    prepared=prepared,
+                    workspace_archive_path=evidence.workspace_archive,
+                    work_title=str(lease.work_request.get("title", "MewCode change")),
+                    work_summary=str(
+                        lease.work_request.get(
+                            "description", "Platform work request"
+                        )
+                    ),
+                    change_summary=(
+                        f"Changed {len(evidence.changed_paths)} deliverable path(s)."
+                    ),
+                    verification_summary=(
+                        "\n".join(verification_lines)
+                        + f"\nRepair rounds: {evidence.repair_rounds}"
+                        + f"\nJob ID: {lease.job_id}"
+                        + f"\nVerification report Artifact ID: {report_id}"
+                    ),
                 )
+                try:
+                    delivery = await self.scm.publish_verified(delivery_request)
+                except asyncio.CancelledError:
+                    if controls.cancellation.is_set() or self._cancelled.is_set():
+                        raise
+                    # A deadline can race with GitHub accepting a branch or PR.
+                    # Spend the one 30 second trusted budget replaying the
+                    # deterministic Delivery request so no PR is left unaccounted.
+                    deadline_cleanup_at = asyncio.get_running_loop().time() + 30
+                    try:
+                        async with asyncio.timeout_at(deadline_cleanup_at):
+                            delivery = await self.scm.publish_verified(delivery_request)
+                    except Exception as error:
+                        raise TimeoutError from error
                 return AttemptOutcome(
                     status=AttemptOutcomeStatus.COMPLETED,
                     usage=evidence.usage,
@@ -801,19 +825,33 @@ class ProductionAttemptProcessor:
                     verification_succeeded=True,
                 )
         except TimeoutError:
+            if attempt_deadline is None or not attempt_deadline.expired():
+                raise
+            evidence.terminal = _AttemptTerminal(
+                "ATTEMPT_DEADLINE_EXCEEDED",
+                "Attempt exceeded its "
+                f"{self.settings.attempt_timeout_seconds} second deadline",
+            )
+            evidence.agent_log = bytes(sink.buffer)
+            if deadline_cleanup_at is None:
+                deadline_cleanup_at = asyncio.get_running_loop().time() + 30
             try:
-                await self._close_executor()
-            except Exception:  # noqa: BLE001 - deadline cleanup trust boundary
-                return AttemptOutcome(
-                    status=AttemptOutcomeStatus.FAILED,
-                    error_code="EXECUTOR_CLEANUP_FAILED",
-                    error_message="Executor cleanup failed after Attempt deadline",
-                    usage=evidence.usage,
-                )
+                async with asyncio.timeout_at(deadline_cleanup_at):
+                    await self._export_failure_workspace(evidence)
+                    await self._close_executor()
+                    evidence.agent_log = bytes(sink.buffer)
+                    # Even a deadline before repository preparation must leave
+                    # all four downloadable diagnostic Artifact kinds.
+                    await self._persist_evidence(lease, evidence)
+            except Exception:  # noqa: BLE001 - bounded deadline cleanup boundary
+                log.warning("Attempt deadline cleanup was incomplete", exc_info=True)
             return AttemptOutcome(
                 status=AttemptOutcomeStatus.FAILED,
                 error_code="ATTEMPT_DEADLINE_EXCEEDED",
-                error_message="Attempt exceeded its 60 minute deadline",
+                error_message=(
+                    "Attempt exceeded its "
+                    f"{self.settings.attempt_timeout_seconds} second deadline"
+                ),
                 usage=evidence.usage,
             )
         except ScmDeliveryConflict as error:
