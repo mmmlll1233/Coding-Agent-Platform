@@ -74,6 +74,7 @@ services:
     cap_add:
       - CHOWN
       - DAC_OVERRIDE
+      - FOWNER
     volumes:
       - platform_state:/var/lib/mewcode/state
       - platform_artifacts:/var/lib/mewcode/artifacts

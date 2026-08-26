@@ -344,6 +344,11 @@ def test_compose_mounts_feishu_secrets_only_into_notifier() -> None:
         assert holders == {"notifier"}
     assert services["worker"]["ports"] == ["127.0.0.1:9091:9091"]
     assert services["worker"]["stop_grace_period"] == "330s"
+    assert set(services["storage-init"]["cap_add"]) == {
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+    }
     worker_environment = services["worker"]["environment"]
     assert "MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS" in worker_environment
     assert "MEWCODE_PLATFORM_ATTEMPT_TIMEOUT_SECONDS" in worker_environment
