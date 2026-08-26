@@ -209,6 +209,8 @@ Docker Executor安全门禁：7 passed
 Docker Compose config：通过
 ```
 
-唯一 skip仍是Windows symlink capability。受保护的 `platform_phase6_live` 手动工作流
-已经配置，但本地验收没有读取真实飞书凭证或向真实群投递；正式发布前由
-`phase6-feishu-live` Environment所有者手动执行并保留run证据。
+唯一 skip仍是Windows symlink capability。验收实现提交 `ab2d15c` 的受保护
+`platform_phase6_live` 手动工作流已在 GitHub Actions run `32951183849` 通过；该 run
+checkout完整 SHA `ab2d15c090d22cba88fc87593d946f00cd73145d`，使用真实 PostgreSQL和
+测试飞书群验证 Notification Lease恢复、第二次 Delivery Attempt成功和 secret不进入
+Outbox可观察字段。两项测试飞书 Environment secret在run结束后已删除。

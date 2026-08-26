@@ -115,4 +115,10 @@ PostgreSQL和测试飞书群，只投递带唯一 gate ID 的卡片；其他故�
 门禁 19 passed、Phase 6定向门禁 19 passed、Docker Executor安全门禁 7 passed、隔离
 资源压力门禁 2 passed；生产镜像构建和 Compose config解析通过，结束后无 Attempt
 container、network或volume残留。
-真实飞书工作流需要受保护 Environment凭证，未在本地执行，不能以本地 fake结果替代。
+
+2026-08-26，验收实现提交 `ab2d15c` 的受保护 GitHub Actions run `32951183849`
+通过。该 run checkout完整 SHA `ab2d15c090d22cba88fc87593d946f00cd73145d`，使用真实
+PostgreSQL和测试飞书群验证过期 Notification Lease由重启后的 Notifier接管、飞书 API
+成功接收卡片、Outbox以第二次 Delivery Attempt进入 `DELIVERED`，结果为
+1 passed/721 deselected。两项测试飞书 Environment secret仅在本次验收窗口一次性配置，
+run结束后已从 `phase6-feishu-live` Environment删除。

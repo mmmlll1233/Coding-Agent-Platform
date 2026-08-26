@@ -367,10 +367,11 @@ Phase 5 live gate均通过；Live Gate 证据为 GitHub Actions run `32843163043
 - Outbox 重试、飞书卡片、结构化日志、健康检查和基础指标。
 - 通知 `JOB_ACCEPTED`、`NEEDS_INPUT`、`SUCCEEDED`、`FAILED`、`CANCELLED`。
 
-交付状态（2026-08-26）：已完成。五类 Job Event 原子生成 Transactional Outbox，
+交付状态（2026-08-26）：已完成并正式验收。五类 Job Event 原子生成 Transactional Outbox，
 独立 Notifier使用租约和fencing无限重试飞书；JSON日志、三组Prometheus指标、分类
 readiness、最小权限Compose角色和受保护Phase 6 live gate均已落地。交付说明见
-`docs/platform/phase6-feishu-observability.md`，at-least-once边界见 ADR 0013。
+`docs/platform/phase6-feishu-observability.md`，at-least-once边界见 ADR 0013。验收实现提交
+`ab2d15c` 的真实飞书 Live Gate已通过；GitHub Actions证据为 run `32951183849`。
 
 验收：飞书临时不可用不影响 Job 终态，恢复后不漏发；正常并发不重复，飞书已接收但
 Notifier尚未确认时崩溃的重复窗口符合记录的at-least-once语义。
