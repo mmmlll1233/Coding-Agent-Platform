@@ -223,6 +223,6 @@ volumes:
 
 networks:
   default:
-    name: mewcode-platform-control
+    name: ${MEWCODE_PLATFORM_CONTROL_NETWORK:-mewcode-platform-control}
   executor-egress:
     name: ${MEWCODE_PLATFORM_EGRESS_NETWORK:-mewcode-phase2-egress}

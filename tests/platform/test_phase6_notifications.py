@@ -350,3 +350,6 @@ def test_compose_mounts_feishu_secrets_only_into_notifier() -> None:
     assert "MEWCODE_PLATFORM_WORKER_SHUTDOWN_GRACE_SECONDS" in worker_environment
     assert services["notifier"]["ports"] == ["127.0.0.1:9092:9092"]
     assert "healthcheck" in services["api"]
+    assert compose["networks"]["default"]["name"] == (
+        "${MEWCODE_PLATFORM_CONTROL_NETWORK:-mewcode-platform-control}"
+    )

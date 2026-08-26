@@ -76,10 +76,13 @@ uv run python scripts/platform_ops.py `
   --project-name mewcode-platform `
   backup .mewcode/backups/phase7-drill --leave-stopped
 
+$env:MEWCODE_PLATFORM_CONTROL_NETWORK="mewcode-phase7-restore-control"
 uv run python scripts/platform_ops.py `
   --project-name mewcode-phase7-restore `
   restore .mewcode/backups/phase7-drill
 ```
+
+恢复项目必须设置独立的 `MEWCODE_PLATFORM_CONTROL_NETWORK`，避免与原项目共享 `postgres` 网络别名；Executor egress网络按设计仍可共享。
 
 验收完成后先确认项目名确为 `mewcode-phase7-restore`，再清理该一次性项目的容器和卷，随后重启原项目。不要把计算出的空变量、通配符或用户目录作为删除目标。
 
