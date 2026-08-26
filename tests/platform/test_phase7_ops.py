@@ -23,6 +23,11 @@ from scripts.platform_ops import (
 )
 
 
+def test_fresh_worker_query_uses_physical_metadata_column() -> None:
+    assert "metadata->>'draining'" in FRESH_WORKER_QUERY
+    assert "metadata_json" not in FRESH_WORKER_QUERY
+
+
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 

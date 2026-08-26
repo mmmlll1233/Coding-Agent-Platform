@@ -8,11 +8,11 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Sequence
-
+from typing import Any, BinaryIO
 
 FORMAT_VERSION = 1
 PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
@@ -28,7 +28,7 @@ REVISION_QUERY = "SELECT version_num FROM alembic_version LIMIT 1;"
 FRESH_WORKER_QUERY = (
     "SELECT count(*) FROM worker_nodes WHERE service_type = 'worker' "
     "AND heartbeat_at >= clock_timestamp() - interval '5 minutes' "
-    "AND coalesce((metadata_json->>'draining')::boolean, false) = false;"
+    "AND coalesce((metadata->>'draining')::boolean, false) = false;"
 )
 ARTIFACT_QUERY = (
     "SELECT coalesce(json_agg(json_build_object("
