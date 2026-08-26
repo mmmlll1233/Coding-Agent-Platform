@@ -5,6 +5,7 @@ import asyncio
 import importlib
 import inspect
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,29 @@ from mewcode.platform.observability import (
 from mewcode.platform.persistence import PlatformRepository, create_database
 from mewcode.platform.settings import PlatformSettings, PlatformSettingsError
 from mewcode.platform.workers import WorkerService
+
+
+def _install_worker_signal_handlers(
+    stop_requested: asyncio.Event,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> tuple[signal.Signals, ...]:
+    event_loop = loop or asyncio.get_running_loop()
+    installed: list[signal.Signals] = []
+    for signum in (signal.SIGTERM,):
+        try:
+            event_loop.add_signal_handler(signum, stop_requested.set)
+        except NotImplementedError:
+            continue
+        installed.append(signum)
+    return tuple(installed)
+
+
+async def _stop_worker_on_signal(
+    service: WorkerService, stop_requested: asyncio.Event
+) -> None:
+    await stop_requested.wait()
+    await service.stop()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -175,7 +199,7 @@ async def _grant_runtime_roles(settings: PlatformSettings) -> int:
         "GRANT SELECT ON job_inputs TO mewcode_worker",
         "GRANT INSERT ON notification_outbox TO mewcode_api, mewcode_worker",
         "GRANT SELECT (status, created_at) ON notification_outbox TO mewcode_api",
-        "GRANT SELECT (job_id, status) ON notification_outbox TO mewcode_worker",
+        "GRANT SELECT (id, job_id, status) ON notification_outbox TO mewcode_worker",
         "GRANT SELECT, UPDATE ON notification_outbox TO mewcode_notifier",
         "GRANT SELECT, INSERT, UPDATE ON worker_nodes TO mewcode_notifier",
     )
@@ -226,9 +250,20 @@ async def _run_worker(settings: PlatformSettings) -> int:
         redactor=redactor,
         metrics=metrics,
     )
+    loop = asyncio.get_running_loop()
+    stop_requested = asyncio.Event()
+    installed_signals = _install_worker_signal_handlers(stop_requested, loop=loop)
+    signal_stop = asyncio.create_task(
+        _stop_worker_on_signal(service, stop_requested),
+        name="worker-signal-stop",
+    )
     try:
         await service.run_forever()
     finally:
+        for signum in installed_signals:
+            loop.remove_signal_handler(signum)
+        signal_stop.cancel()
+        await asyncio.gather(signal_stop, return_exceptions=True)
         metrics_server.shutdown()
         metrics_server.server_close()
         await database.aclose()

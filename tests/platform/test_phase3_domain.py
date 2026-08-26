@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import signal
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
 from mewcode.platform.api.schemas import RepositoryRequest
+from mewcode.platform.cli import _install_worker_signal_handlers
 from mewcode.platform.domain import (
     AttemptStatus,
     InvalidTransition,
@@ -18,6 +21,26 @@ from mewcode.platform.persistence import PostgresJobEventSink
 from mewcode.platform.runtime import JobEvent
 from mewcode.platform.settings import PlatformSettings, PlatformSettingsError
 from mewcode.platform.workers import WorkerService
+
+
+class _SignalLoop:
+    def __init__(self) -> None:
+        self.callbacks: dict[signal.Signals, object] = {}
+
+    def add_signal_handler(self, signum, callback, *args) -> None:
+        self.callbacks[signum] = (callback, args)
+
+
+def test_worker_cli_installs_sigterm_drain_handler() -> None:
+    stop_requested = asyncio.Event()
+    loop = _SignalLoop()
+
+    installed = _install_worker_signal_handlers(stop_requested, loop=loop)
+    callback, args = loop.callbacks[signal.SIGTERM]
+    callback(*args)
+
+    assert installed == (signal.SIGTERM,)
+    assert stop_requested.is_set()
 
 
 def test_job_state_machine_requires_delivery_evidence() -> None:
