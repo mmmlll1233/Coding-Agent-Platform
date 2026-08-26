@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -44,7 +45,7 @@ async def test_phase6_feishu_delivery_and_notifier_restart_recovery() -> None:
     webhook_url, signing_secret = settings.validate_notifier()
     redactor = SensitiveValueRedactor((webhook_url, signing_secret))
     database = create_database(settings)
-    command.upgrade(_alembic_config(settings), "head")
+    await asyncio.to_thread(command.upgrade, _alembic_config(settings), "head")
     repository = PlatformRepository(
         database,
         notifications_enabled=True,
