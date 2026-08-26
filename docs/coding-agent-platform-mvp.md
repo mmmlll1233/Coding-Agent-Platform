@@ -206,10 +206,13 @@ API Key 只在创建时显示，数据库保存哈希；日志只记录 key id�
 
 ### `notification_outbox`
 
-- `id`, `job_id`, `event_type`, `destination`, `payload`
+- `id`, `job_id`, `source_event_sequence`, `event_type`, `destination`, `payload`
 - `status`, `attempt_count`, `next_attempt_at`, `last_error`
+- `locked_by`, `fencing_token`, `lease_expires_at`, `delivered_at`, `updated_at`
 
-唯一约束：`(job_id, event_type, destination)`，保证飞书幂等投递。
+唯一约束：`(job_id, source_event_sequence, destination)`，保证同一持久化事件只入队
+一次，同时允许同一 Job 在不同 Attempt 多次进入同类状态。飞书 webhook交付为
+at-least-once；Notification ID 用于识别崩溃歧义窗口产生的重复卡片。
 
 ## 7. 单个 Job 的执行流水线
 
@@ -222,7 +225,7 @@ API Key 只在创建时显示，数据库保存哈希；日志只记录 key id�
 7. **Verification**：平台而不是 Agent 逐条执行 Verification Contract；所有 exit code 必须为 0。失败结果最多反馈给 Agent 进行两轮修复，再执行完整 Verification。
 8. **可信收口**：导出 Workspace、生成并持久化四类 Artifact，关闭 Runtime，并确认 Executor 容器、网络和 volume 全部清零。
 9. **形成 Delivery**：事务推进到不可取消的 `PUBLISHING` 后，受信任 SCM Adapter 生成提交、推送 `mewcode/{job_id}` 分支，并幂等创建 Draft PR。
-10. **持久化终态**：写入 PR URL、最终 commit、Verification 报告和 usage，然后置为 `SUCCEEDED`；通知属于 Phase 6。
+10. **持久化终态**：写入 PR URL、最终 commit、Verification 报告和 usage，然后置为 `SUCCEEDED`；在同一事务中生成 Phase 6 Notification Outbox记录。
 
 PR 内容固定包含：Work Request 摘要、修改说明、Verification 命令及结果、风险/未覆盖项、Job ID和生成声明。Agent 不得创建正式 PR、合并 PR、force push 或改写目标分支。
 
@@ -364,7 +367,13 @@ Phase 5 live gate均通过；Live Gate 证据为 GitHub Actions run `32843163043
 - Outbox 重试、飞书卡片、结构化日志、健康检查和基础指标。
 - 通知 `JOB_ACCEPTED`、`NEEDS_INPUT`、`SUCCEEDED`、`FAILED`、`CANCELLED`。
 
-验收：飞书临时不可用不影响 Job 终态，恢复后不会漏发或重复发送。
+交付状态（2026-08-26）：已完成。五类 Job Event 原子生成 Transactional Outbox，
+独立 Notifier使用租约和fencing无限重试飞书；JSON日志、三组Prometheus指标、分类
+readiness、最小权限Compose角色和受保护Phase 6 live gate均已落地。交付说明见
+`docs/platform/phase6-feishu-observability.md`，at-least-once边界见 ADR 0013。
+
+验收：飞书临时不可用不影响 Job 终态，恢复后不漏发；正常并发不重复，飞书已接收但
+Notifier尚未确认时崩溃的重复窗口符合记录的at-least-once语义。
 
 ### Phase 7：端到端硬化（4～6 天）
 

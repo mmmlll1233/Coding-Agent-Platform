@@ -1,0 +1,78 @@
+name: Phase 6 Feishu notification live gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase6-live
+  cancel-in-progress: false
+
+jobs:
+  phase6-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: phase6-feishu-live
+    services:
+      postgres:
+        image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+        env:
+          POSTGRES_DB: mewcode_phase6
+          POSTGRES_USER: mewcode_phase6
+          POSTGRES_PASSWORD: mewcode_phase6_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mewcode_phase6 -d mewcode_phase6"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      MEWCODE_TEST_DATABASE_URL: postgresql+asyncpg://mewcode_phase6:mewcode_phase6_password@127.0.0.1:5432/mewcode_phase6
+      MEWCODE_PHASE6_GATE_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Materialize protected Feishu secrets
+        shell: bash
+        env:
+          MEWCODE_TEST_FEISHU_WEBHOOK_URL: ${{ secrets.MEWCODE_TEST_FEISHU_WEBHOOK_URL }}
+          MEWCODE_TEST_FEISHU_SIGNING_SECRET: ${{ secrets.MEWCODE_TEST_FEISHU_SIGNING_SECRET }}
+        run: |
+          set -euo pipefail
+          webhook_file="$RUNNER_TEMP/mewcode-phase6-webhook"
+          signing_file="$RUNNER_TEMP/mewcode-phase6-signing"
+          printf '%s' "$MEWCODE_TEST_FEISHU_WEBHOOK_URL" > "$webhook_file"
+          printf '%s' "$MEWCODE_TEST_FEISHU_SIGNING_SECRET" > "$signing_file"
+          chmod 600 "$webhook_file" "$signing_file"
+          echo "MEWCODE_TEST_FEISHU_WEBHOOK_URL_FILE=$webhook_file" >> "$GITHUB_ENV"
+          echo "MEWCODE_TEST_FEISHU_SIGNING_SECRET_FILE=$signing_file" >> "$GITHUB_ENV"
+
+      - name: Run protected Phase 6 live gate
+        run: >-
+          uv run pytest -q --strict-markers --enforce-platform-outcomes
+          -m platform_phase6_live
+
+      - name: Remove protected Feishu secrets
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$MEWCODE_TEST_FEISHU_WEBHOOK_URL_FILE"
+          rm -f "$MEWCODE_TEST_FEISHU_SIGNING_SECRET_FILE"

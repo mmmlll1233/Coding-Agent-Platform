@@ -47,7 +47,7 @@ jobs:
         run: >-
           uv run pytest -q --strict-markers --enforce-platform-outcomes
           --basetemp .mewcode/pytest-ci-${{ matrix.os }}-${{ matrix.python-version }}
-          -m "not executor_security and not resource_exhaustion and not platform_postgres and not platform_github_live and not platform_phase5_live"
+          -m "not executor_security and not resource_exhaustion and not platform_postgres and not platform_github_live and not platform_phase5_live and not platform_phase6_live"
 
       - name: Verify tests left the checkout clean
         run: >-

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from mewcode.platform.domain import (
     RepositoryTargetUnavailable,
 )
 from mewcode.platform.execution import SensitiveValueRedactor
+from mewcode.platform.observability import ApiMetrics, log_context
 from mewcode.platform.persistence import (
     ApiKeyPrincipal,
     Database,
@@ -79,6 +81,7 @@ class PlatformComponents:
     resolver: RepositoryTargetResolver | None = None
     artifact_store: LocalArtifactStore | None = None
     artifact_service: ArtifactService | None = None
+    metrics: ApiMetrics | None = None
 
 
 def _error_response(request: Request, error: ApiError) -> JSONResponse:
@@ -147,9 +150,14 @@ def create_app(
             repository=PlatformRepository(
                 database,
                 metadata_retention_days=resolved_settings.metadata_retention_days,
+                notifications_enabled=resolved_settings.notifications_enabled,
+                notification_destination=resolved_settings.notification_destination,
             ),
             artifact_store=LocalArtifactStore(resolved_settings.artifact_root),
+            metrics=ApiMetrics(),
         )
+    if components.metrics is None:
+        components.metrics = ApiMetrics()
     if components.artifact_service is None and components.artifact_store is not None:
         components.artifact_service = ArtifactService(
             components.repository,
@@ -173,17 +181,43 @@ def create_app(
 
     app = FastAPI(
         title="MewCode Coding Platform",
-        version="1.0.0-phase5",
+        version="1.0.0-phase6",
         lifespan=lifespan,
     )
     app.state.components = components
 
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
+        started = time.monotonic()
         supplied = request.headers.get("X-Request-ID", "")
         request.state.request_id = (
             supplied if _REQUEST_ID.fullmatch(supplied) else str(uuid4())
         )
+
+        def finish(response: Response) -> Response:
+            response.headers["X-Request-ID"] = request.state.request_id
+            route = getattr(request.scope.get("route"), "path", "unmatched")
+            duration = time.monotonic() - started
+            assert components.metrics is not None
+            components.metrics.observe_request(
+                route=route,
+                method=request.method,
+                status_code=response.status_code,
+                duration_seconds=duration,
+            )
+            log.info(
+                "HTTP request completed",
+                extra={
+                    "event": "http_request",
+                    "request_id": request.state.request_id,
+                    "route": route,
+                    "method": request.method,
+                    "status": response.status_code,
+                    "duration_ms": round(duration * 1000, 3),
+                },
+            )
+            return response
+
         content_length = request.headers.get("content-length")
         if content_length:
             try:
@@ -199,8 +233,7 @@ def create_app(
                         f"Request body must not exceed {MAX_REQUEST_BYTES} bytes",
                     ),
                 )
-                response.headers["X-Request-ID"] = request.state.request_id
-                return response
+                return finish(response)
         if request.method in {"POST", "PUT", "PATCH"}:
             body = bytearray()
             async for chunk in request.stream():
@@ -214,12 +247,11 @@ def create_app(
                             f"Request body must not exceed {MAX_REQUEST_BYTES} bytes",
                         ),
                     )
-                    response.headers["X-Request-ID"] = request.state.request_id
-                    return response
+                    return finish(response)
             request._body = bytes(body)
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        return response
+        with log_context(request_id=request.state.request_id):
+            response = await call_next(request)
+        return finish(response)
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, error: ApiError) -> JSONResponse:
@@ -288,15 +320,33 @@ def create_app(
             if schema_ready
             else False
         )
+        notifier_ready = (
+            await current.repository.has_fresh_service(
+                service_type="notifier",
+                stale_seconds=current.settings.worker_stale_seconds,
+            )
+            if schema_ready and current.settings.notifications_enabled
+            else not current.settings.notifications_enabled
+        )
         checks = {
             "database": database_ready,
             "schema": schema_ready,
             "worker": worker_ready,
+            "notifier": notifier_ready,
         }
+        assert current.metrics is not None
+        current.metrics.set_readiness(checks)
         if not all(checks.values()):
             response.status_code = 503
             return HealthResponse(status="not_ready", checks=checks)
         return HealthResponse(status="ready", checks=checks)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics(request: Request) -> Response:
+        current: PlatformComponents = request.app.state.components
+        assert current.metrics is not None
+        body, media_type = current.metrics.render()
+        return Response(content=body, media_type=media_type)
 
     @app.post("/v1/jobs", status_code=202, response_model=JobResponse)
     async def create_job(

@@ -25,6 +25,7 @@ services:
       - migrator_db_password
       - api_db_password
       - worker_db_password
+      - notifier_db_password
     volumes:
       - platform_postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/00-create-runtime-roles.sh:/docker-entrypoint-initdb.d/00-create-runtime-roles.sh:ro
@@ -42,6 +43,7 @@ services:
     environment:
       MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_migrator@postgres:5432/mewcode
       MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/migrator_db_password
+      MEWCODE_PLATFORM_LOG_FORMAT: json
     secrets:
       - migrator_db_password
     depends_on:
@@ -54,6 +56,7 @@ services:
     environment:
       MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_migrator@postgres:5432/mewcode
       MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/migrator_db_password
+      MEWCODE_PLATFORM_LOG_FORMAT: json
     secrets:
       - migrator_db_password
     depends_on:
@@ -88,6 +91,9 @@ services:
       MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID: ${MEWCODE_PLATFORM_GITHUB_APP_CLIENT_ID:-}
       MEWCODE_PLATFORM_GITHUB_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
       MEWCODE_PLATFORM_ARTIFACT_ROOT: /var/lib/mewcode/artifacts
+      MEWCODE_PLATFORM_NOTIFICATIONS_ENABLED: "true"
+      MEWCODE_PLATFORM_NOTIFICATION_DESTINATION: feishu:platform
+      MEWCODE_PLATFORM_LOG_FORMAT: json
     secrets:
       - api_db_password
       - github_app_private_key
@@ -100,6 +106,12 @@ services:
         condition: service_completed_successfully
       storage-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   worker:
     <<: *platform-service
@@ -130,6 +142,10 @@ services:
       MEWCODE_PLATFORM_ARTIFACT_RETENTION_DAYS: ${MEWCODE_PLATFORM_ARTIFACT_RETENTION_DAYS:-7}
       MEWCODE_PLATFORM_METADATA_RETENTION_DAYS: ${MEWCODE_PLATFORM_METADATA_RETENTION_DAYS:-30}
       MEWCODE_PLATFORM_JANITOR_INTERVAL_SECONDS: ${MEWCODE_PLATFORM_JANITOR_INTERVAL_SECONDS:-3600}
+      MEWCODE_PLATFORM_NOTIFICATIONS_ENABLED: "true"
+      MEWCODE_PLATFORM_NOTIFICATION_DESTINATION: feishu:platform
+      MEWCODE_PLATFORM_WORKER_METRICS_PORT: 9091
+      MEWCODE_PLATFORM_LOG_FORMAT: json
     secrets:
       - worker_db_password
       - platform_llm_api_key
@@ -141,10 +157,41 @@ services:
     networks:
       - default
       - executor-egress
+    ports:
+      - 127.0.0.1:9091:9091
     depends_on:
       grant-runtime:
         condition: service_completed_successfully
       storage-init:
+        condition: service_completed_successfully
+
+  notifier:
+    <<: *platform-service
+    command: ["notifier"]
+    restart: unless-stopped
+    environment:
+      MEWCODE_PLATFORM_DATABASE_URL: postgresql+asyncpg://mewcode_notifier@postgres:5432/mewcode
+      MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/notifier_db_password
+      MEWCODE_PLATFORM_NOTIFICATIONS_ENABLED: "true"
+      MEWCODE_PLATFORM_NOTIFICATION_DESTINATION: feishu:platform
+      MEWCODE_PLATFORM_FEISHU_WEBHOOK_URL_FILE: /run/secrets/feishu_webhook_url
+      MEWCODE_PLATFORM_FEISHU_SIGNING_SECRET_FILE: /run/secrets/feishu_signing_secret
+      MEWCODE_PLATFORM_NOTIFIER_ID: notifier-compose
+      MEWCODE_PLATFORM_NOTIFICATION_POLL_MILLISECONDS: 500
+      MEWCODE_PLATFORM_NOTIFICATION_LEASE_SECONDS: 60
+      MEWCODE_PLATFORM_NOTIFICATION_TIMEOUT_SECONDS: 10
+      MEWCODE_PLATFORM_NOTIFICATION_BACKOFF_BASE_SECONDS: 5
+      MEWCODE_PLATFORM_NOTIFICATION_BACKOFF_MAX_SECONDS: 900
+      MEWCODE_PLATFORM_NOTIFIER_METRICS_PORT: 9092
+      MEWCODE_PLATFORM_LOG_FORMAT: json
+    secrets:
+      - notifier_db_password
+      - feishu_webhook_url
+      - feishu_signing_secret
+    ports:
+      - 127.0.0.1:9092:9092
+    depends_on:
+      grant-runtime:
         condition: service_completed_successfully
 
 secrets:
@@ -154,10 +201,16 @@ secrets:
     file: ${MEWCODE_API_DB_PASSWORD_FILE:-.mewcode/secrets/api_db_password}
   worker_db_password:
     file: ${MEWCODE_WORKER_DB_PASSWORD_FILE:-.mewcode/secrets/worker_db_password}
+  notifier_db_password:
+    file: ${MEWCODE_NOTIFIER_DB_PASSWORD_FILE:-.mewcode/secrets/notifier_db_password}
   github_app_private_key:
     file: ${MEWCODE_GITHUB_APP_PRIVATE_KEY_FILE:-.mewcode/secrets/github_app_private_key.pem}
   platform_llm_api_key:
     file: ${MEWCODE_PLATFORM_LLM_API_KEY_FILE:-.mewcode/secrets/platform_llm_api_key}
+  feishu_webhook_url:
+    file: ${MEWCODE_FEISHU_WEBHOOK_URL_FILE:-.mewcode/secrets/feishu_webhook_url}
+  feishu_signing_secret:
+    file: ${MEWCODE_FEISHU_SIGNING_SECRET_FILE:-.mewcode/secrets/feishu_signing_secret}
 
 volumes:
   platform_postgres_data:

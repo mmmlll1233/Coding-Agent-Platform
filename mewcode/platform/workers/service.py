@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 from uuid import uuid4
 
 from mewcode.platform.domain import (
@@ -14,6 +15,7 @@ from mewcode.platform.domain import (
     AttemptStage,
 )
 from mewcode.platform.execution import SensitiveValueRedactor
+from mewcode.platform.observability import WorkerMetrics, log_context
 from mewcode.platform.persistence import (
     ClaimedAttempt,
     LeaseLost,
@@ -33,11 +35,13 @@ class WorkerService:
         processor_factory: AttemptProcessorFactory | None,
         *,
         redactor: SensitiveValueRedactor | None = None,
+        metrics: WorkerMetrics | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.processor_factory = processor_factory
         self.redactor = redactor or SensitiveValueRedactor(())
+        self.metrics = metrics
         self.worker_id = settings.worker_id or (
             f"{socket.gethostname()}-{uuid4().hex[:12]}"
         )
@@ -65,6 +69,8 @@ class WorkerService:
             recovered = await self.repository.recover_expired_leases()
             if recovered:
                 log.warning("Recovered %s expired Worker Lease(s)", recovered)
+                if self.metrics is not None:
+                    self.metrics.lease_recoveries.inc(recovered)
             try:
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=self.settings.recovery_seconds
@@ -88,6 +94,8 @@ class WorkerService:
                     )
             except Exception:
                 log.exception("Retention janitor failed")
+                if self.metrics is not None:
+                    self.metrics.janitor_failures.inc()
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
@@ -164,8 +172,18 @@ class WorkerService:
                 continue
 
     async def _run_claimed(self, claimed: ClaimedAttempt) -> None:
+        lease = claimed.lease
+        with log_context(
+            job_id=str(lease.job_id),
+            attempt_id=str(lease.attempt_id),
+            worker_id=lease.worker_id,
+        ):
+            await self._run_claimed_in_context(claimed)
+
+    async def _run_claimed_in_context(self, claimed: ClaimedAttempt) -> None:
         assert self.processor_factory is not None
         lease = claimed.lease
+        started = time.monotonic()
         processor = self.processor_factory.create(lease)
         cancellation = asyncio.Event()
         done = asyncio.Event()
@@ -232,12 +250,22 @@ class WorkerService:
             log.warning(
                 "Discarded stale Attempt outcome attempt_id=%s", lease.attempt_id
             )
+        if self.metrics is not None:
+            label = outcome.status.value.lower()
+            self.metrics.attempts.labels(label).inc()
+            self.metrics.attempt_duration.labels(label).observe(
+                time.monotonic() - started
+            )
 
     def _track(self, task: asyncio.Task[None]) -> None:
         self._active.add(task)
+        if self.metrics is not None:
+            self.metrics.active_attempts.set(len(self._active))
 
         def finished(completed: asyncio.Task[None]) -> None:
             self._active.discard(completed)
+            if self.metrics is not None:
+                self.metrics.active_attempts.set(len(self._active))
             if (
                 not completed.cancelled()
                 and (error := completed.exception()) is not None

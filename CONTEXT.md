@@ -56,6 +56,14 @@ _Avoid_: Attachment, workspace file, result
 The reviewable code change produced for a successful Job; for the MVP, a Delivery is a GitHub Draft Pull Request.
 _Avoid_: Result, output, patch
 
+**Notification**:
+An externally visible status card derived from exactly one persisted Job Event and identified by a stable Notification ID.
+_Avoid_: Delivery, Job Event, message
+
+**Notification Delivery Attempt**:
+One Notifier call to the external notification platform for a Notification; it is independent of a Job Attempt.
+_Avoid_: Attempt, retry task
+
 **Needs Input**:
 A non-terminal Job condition in which MewCode cannot continue safely without clarification from the Requester.
 _Avoid_: Failed, blocked

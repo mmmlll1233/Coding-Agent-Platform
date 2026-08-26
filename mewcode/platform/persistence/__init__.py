@@ -3,8 +3,10 @@ from .events import PostgresJobEventSink
 from .ports import (
     ArtifactMetadata,
     ArtifactMetadataRepository,
+    ClaimedNotification,
     NotificationMessage,
     NotificationOutboxRepository,
+    NotificationOutboxStats,
 )
 from .repositories import (
     ApiKeyPrincipal,
@@ -22,12 +24,14 @@ __all__ = [
     "ArtifactMetadata",
     "ArtifactMetadataRepository",
     "ClaimedAttempt",
+    "ClaimedNotification",
     "Database",
     "IdempotencyConflict",
     "LeaseLost",
     "NotFound",
     "NotificationMessage",
     "NotificationOutboxRepository",
+    "NotificationOutboxStats",
     "PlatformRepository",
     "PostgresJobEventSink",
     "StateConflict",

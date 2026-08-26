@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
 
 from mewcode.platform.settings import PlatformSettings
 
-SCHEMA_REVISION = "0003_phase5_artifacts"
+SCHEMA_REVISION = "0004_phase6_notifications_observability"
 
 
 @dataclass

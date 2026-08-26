@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import importlib
 import inspect
-import logging
 import os
 import sys
 from pathlib import Path
@@ -23,6 +22,14 @@ from mewcode.platform.execution import (
     SensitiveValueRedactor,
     shared_platform_redactor,
 )
+from mewcode.platform.notifications import FeishuWebhookClient, NotifierService
+from mewcode.platform.observability import (
+    ApiMetrics,
+    NotifierMetrics,
+    WorkerMetrics,
+    configure_platform_logging,
+    start_metrics_server,
+)
 from mewcode.platform.persistence import PlatformRepository, create_database
 from mewcode.platform.settings import PlatformSettings, PlatformSettingsError
 from mewcode.platform.workers import WorkerService
@@ -33,6 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("api", help="Run the Control API")
     subcommands.add_parser("worker", help="Run the Job Worker")
+    subcommands.add_parser("notifier", help="Run the Feishu notification service")
 
     database = subcommands.add_parser("db", help="Manage the PostgreSQL schema")
     database_subcommands = database.add_subparsers(dest="db_command", required=True)
@@ -113,6 +121,15 @@ def _secret_redactor(settings: PlatformSettings) -> SensitiveValueRedactor:
             secrets.append(Path(settings.llm_api_key_file).read_text(encoding="utf-8"))
         except OSError:
             pass
+    for secret_file in (
+        settings.feishu_webhook_url_file,
+        settings.feishu_signing_secret_file,
+    ):
+        if secret_file:
+            try:
+                secrets.append(Path(secret_file).read_text(encoding="utf-8").strip())
+            except OSError:
+                pass
     redactor = shared_platform_redactor()
     redactor.add(*secrets)
     return redactor
@@ -148,7 +165,7 @@ async def _revoke_key(settings: PlatformSettings, key_id: UUID) -> int:
 async def _grant_runtime_roles(settings: PlatformSettings) -> int:
     database = create_database(settings)
     statements = (
-        "GRANT USAGE ON SCHEMA public TO mewcode_api, mewcode_worker",
+        "GRANT USAGE ON SCHEMA public TO mewcode_api, mewcode_worker, mewcode_notifier",
         "GRANT SELECT ON alembic_version TO mewcode_api",
         "GRANT SELECT ON tenants, requesters, api_keys, worker_nodes, artifacts TO mewcode_api",
         "GRANT SELECT, INSERT, UPDATE ON jobs, attempts, job_inputs, job_events TO mewcode_api",
@@ -156,6 +173,11 @@ async def _grant_runtime_roles(settings: PlatformSettings) -> int:
         "GRANT SELECT, INSERT, DELETE ON artifacts TO mewcode_worker",
         "GRANT DELETE ON jobs TO mewcode_worker",
         "GRANT SELECT ON job_inputs TO mewcode_worker",
+        "GRANT INSERT ON notification_outbox TO mewcode_api, mewcode_worker",
+        "GRANT SELECT (status, created_at) ON notification_outbox TO mewcode_api",
+        "GRANT SELECT (job_id, status) ON notification_outbox TO mewcode_worker",
+        "GRANT SELECT, UPDATE ON notification_outbox TO mewcode_notifier",
+        "GRANT SELECT, INSERT, UPDATE ON worker_nodes TO mewcode_notifier",
     )
     try:
         async with database.engine.begin() as connection:
@@ -173,10 +195,24 @@ async def _run_worker(settings: PlatformSettings) -> int:
         )
     settings.validate_worker()
     database = create_database(settings)
-    repository = PlatformRepository(
-        database, metadata_retention_days=settings.metadata_retention_days
-    )
     redactor = _secret_redactor(settings)
+    configure_platform_logging(
+        service="worker",
+        level=settings.log_level,
+        log_format=settings.log_format,
+        redactor=redactor,
+    )
+    repository = PlatformRepository(
+        database,
+        metadata_retention_days=settings.metadata_retention_days,
+        notifications_enabled=settings.notifications_enabled,
+        notification_destination=settings.notification_destination,
+        redactor=redactor,
+    )
+    metrics = WorkerMetrics()
+    metrics_server, _ = start_metrics_server(
+        settings.worker_metrics_port, metrics.registry
+    )
     processor_factory = _load_component(
         settings.attempt_processor_factory,
         settings,
@@ -188,10 +224,53 @@ async def _run_worker(settings: PlatformSettings) -> int:
         repository,
         processor_factory,
         redactor=redactor,
+        metrics=metrics,
     )
     try:
         await service.run_forever()
     finally:
+        metrics_server.shutdown()
+        metrics_server.server_close()
+        await database.aclose()
+    return 0
+
+
+async def _run_notifier(settings: PlatformSettings) -> int:
+    webhook_url, signing_secret = settings.validate_notifier()
+    redactor = _secret_redactor(settings)
+    redactor.add(webhook_url, signing_secret)
+    configure_platform_logging(
+        service="notifier",
+        level=settings.log_level,
+        log_format=settings.log_format,
+        redactor=redactor,
+    )
+    database = create_database(settings)
+    repository = PlatformRepository(
+        database,
+        notifications_enabled=True,
+        notification_destination=settings.notification_destination,
+        redactor=redactor,
+    )
+    metrics = NotifierMetrics()
+    metrics_server, _ = start_metrics_server(
+        settings.notifier_metrics_port, metrics.registry
+    )
+    client = FeishuWebhookClient(
+        webhook_url,
+        signing_secret,
+        timeout_seconds=settings.notification_timeout_seconds,
+        redactor=redactor,
+    )
+    service = NotifierService(
+        settings, repository, client, redactor=redactor, metrics=metrics
+    )
+    try:
+        await service.run_forever()
+    finally:
+        metrics_server.shutdown()
+        metrics_server.server_close()
+        await client.aclose()
         await database.aclose()
     return 0
 
@@ -200,9 +279,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         settings = PlatformSettings.from_env()
-        logging.basicConfig(
-            level=getattr(logging, settings.log_level, logging.INFO),
-            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        redactor = _secret_redactor(settings)
+        configure_platform_logging(
+            service=args.command,
+            level=settings.log_level,
+            log_format=settings.log_format,
+            redactor=redactor,
         )
         if args.command == "db":
             if args.db_command == "upgrade":
@@ -215,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_revoke_key(settings, args.key_id))
         if args.command == "worker":
             return asyncio.run(_run_worker(settings))
+        if args.command == "notifier":
+            return asyncio.run(_run_notifier(settings))
 
         resolver = (
             _load_component(settings.repository_resolver_factory, settings)
@@ -222,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         database = create_database(settings)
+        metrics = ApiMetrics()
         app = create_app(
             components=PlatformComponents(
                 settings=settings,
@@ -229,9 +314,13 @@ def main(argv: list[str] | None = None) -> int:
                 repository=PlatformRepository(
                     database,
                     metadata_retention_days=settings.metadata_retention_days,
+                    notifications_enabled=settings.notifications_enabled,
+                    notification_destination=settings.notification_destination,
+                    redactor=redactor,
                 ),
                 resolver=resolver,
                 artifact_store=LocalArtifactStore(settings.artifact_root),
+                metrics=metrics,
             )
         )
         uvicorn.run(
@@ -240,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             port=settings.port,
             log_level=settings.log_level.lower(),
             access_log=False,
+            log_config=None,
         )
         return 0
     except (PlatformSettingsError, RuntimeError) as error:

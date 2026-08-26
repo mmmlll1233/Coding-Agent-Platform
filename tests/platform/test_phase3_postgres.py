@@ -11,10 +11,10 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from sqlalchemy import func, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from mewcode.platform.api import PlatformComponents, create_app
-from mewcode.platform.cli import _alembic_config
+from mewcode.platform.cli import _alembic_config, _grant_runtime_roles
 from mewcode.platform.domain import (
     AttemptControls,
     AttemptLease,
@@ -35,7 +35,7 @@ from mewcode.platform.persistence import (
     StateConflict,
     create_database,
 )
-from mewcode.platform.persistence.orm import AttemptRow, JobRow
+from mewcode.platform.persistence.orm import AttemptRow, JobRow, NotificationOutboxRow
 from mewcode.platform.runtime import JobEvent
 from mewcode.platform.settings import PlatformSettings
 from mewcode.platform.workers import WorkerService
@@ -161,6 +161,57 @@ def test_phase4_migration_fails_closed_on_incomplete_historical_success(
         asyncio.run(
             _migration_sql(
                 postgres_settings,
+                f"DELETE FROM jobs WHERE id = '{job_id}'",
+                f"DELETE FROM requesters WHERE id = '{requester_id}'",
+                f"DELETE FROM tenants WHERE id = '{tenant_id}'",
+            )
+        )
+        command.upgrade(config, "head")
+
+
+def test_phase6_migration_rejects_historical_outbox_rows(
+    postgres_settings: PlatformSettings,
+) -> None:
+    config = _alembic_config(postgres_settings)
+    tenant_id = "00000000-0000-0000-0000-000000000611"
+    requester_id = "00000000-0000-0000-0000-000000000612"
+    job_id = "00000000-0000-0000-0000-000000000613"
+    outbox_id = "00000000-0000-0000-0000-000000000614"
+    command.downgrade(config, "0003_phase5_artifacts")
+    asyncio.run(
+        _migration_sql(
+            postgres_settings,
+            f"INSERT INTO tenants (id, name) VALUES ('{tenant_id}', 'phase6-migration')",
+            f"INSERT INTO requesters (id, tenant_id, name) "
+            f"VALUES ('{requester_id}', '{tenant_id}', 'phase6-migration')",
+            f"""
+            INSERT INTO jobs (
+              id, tenant_id, requester_id, idempotency_key, request_hash,
+              status, installation_id, repo_owner, repo_name, base_ref, base_sha,
+              work_request, execution_contract
+            ) VALUES (
+              '{job_id}', '{tenant_id}', '{requester_id}', 'phase6-migration',
+              '{"6" * 64}', 'QUEUED', 7, 'Acme', 'Repo', 'main',
+              '{"a" * 40}', '{{}}'::jsonb, '{{}}'::jsonb
+            )
+            """,
+            f"""
+            INSERT INTO notification_outbox (
+              id, job_id, event_type, destination, payload
+            ) VALUES (
+              '{outbox_id}', '{job_id}', 'FAILED', 'feishu:platform', '{{}}'::jsonb
+            )
+            """,
+        )
+    )
+    try:
+        with pytest.raises(Exception, match="requires an empty notification_outbox"):
+            command.upgrade(config, "head")
+    finally:
+        asyncio.run(
+            _migration_sql(
+                postgres_settings,
+                f"DELETE FROM notification_outbox WHERE id = '{outbox_id}'",
                 f"DELETE FROM jobs WHERE id = '{job_id}'",
                 f"DELETE FROM requesters WHERE id = '{requester_id}'",
                 f"DELETE FROM tenants WHERE id = '{tenant_id}'",
@@ -531,6 +582,224 @@ async def test_phase5_retention_deletes_only_expired_terminal_jobs(database) -> 
     assert retained.retention_until is None
 
 
+@pytest.mark.asyncio
+async def test_phase6_job_events_enqueue_notifications_atomically_and_by_sequence(
+    database,
+) -> None:
+    redactor = SensitiveValueRedactor(("phase6-secret-canary",))
+    repository = PlatformRepository(
+        database,
+        notifications_enabled=True,
+        notification_destination="feishu:platform",
+        redactor=redactor,
+    )
+    _, principal = await _principal(repository, "phase6-events")
+    job, _ = await _create(repository, principal, "phase6-events")
+    replay = await repository.lookup_idempotent_job(
+        principal=principal,
+        idempotency_key="phase6-events",
+        request_hash="phase6-events".ljust(64, "0")[:64],
+    )
+    assert replay is not None and replay.id == job.id
+
+    first = await repository.claim_attempt(
+        worker_id="phase6-worker-a", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert first is not None
+    await repository.finish_attempt(
+        attempt_id=first.lease.attempt_id,
+        worker_id=first.lease.worker_id,
+        fencing_token=first.lease.fencing_token,
+        outcome=AttemptOutcome(status=AttemptOutcomeStatus.NEEDS_INPUT),
+    )
+    await repository.add_input(
+        principal=principal, job_id=job.id, content="safe additional input"
+    )
+    second = await repository.claim_attempt(
+        worker_id="phase6-worker-b", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert second is not None
+    await repository.finish_attempt(
+        attempt_id=second.lease.attempt_id,
+        worker_id=second.lease.worker_id,
+        fencing_token=second.lease.fencing_token,
+        outcome=AttemptOutcome(
+            status=AttemptOutcomeStatus.FAILED,
+            error_code="TEST_FAILURE",
+            error_message="safe phase6-secret-canary",
+        ),
+    )
+    await repository.retry_job(principal=principal, job_id=job.id)
+    third = await repository.claim_attempt(
+        worker_id="phase6-worker-c", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert third is not None
+    await repository.finish_attempt(
+        attempt_id=third.lease.attempt_id,
+        worker_id=third.lease.worker_id,
+        fencing_token=third.lease.fencing_token,
+        outcome=AttemptOutcome(
+            status=AttemptOutcomeStatus.FAILED,
+            error_code="TEST_FAILURE_AGAIN",
+        ),
+    )
+
+    async with database.sessions() as session:
+        rows = (
+            await session.scalars(
+                select(NotificationOutboxRow)
+                .where(NotificationOutboxRow.job_id == job.id)
+                .order_by(NotificationOutboxRow.source_event_sequence)
+            )
+        ).all()
+    assert [row.event_type for row in rows] == [
+        "JOB_ACCEPTED",
+        "NEEDS_INPUT",
+        "FAILED",
+        "FAILED",
+    ]
+    assert len({row.source_event_sequence for row in rows}) == 4
+    assert all(row.payload["notification_id"] == str(row.id) for row in rows)
+    assert "phase6-secret-canary" not in str([row.payload for row in rows])
+    assert "[REDACTED]" in str([row.payload for row in rows])
+
+    cancel_job, _ = await _create(repository, principal, "phase6-cancel")
+    cancel_attempt = await repository.claim_attempt(
+        worker_id="phase6-worker-cancel", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert cancel_attempt is not None
+    before_cancel = await repository.notification_outbox_stats()
+    requested = await repository.cancel_job(
+        principal=principal, job_id=cancel_job.id
+    )
+    assert requested.status == JobStatus.CANCEL_REQUESTED.value
+    after_request = await repository.notification_outbox_stats()
+    assert (
+        after_request.pending,
+        after_request.in_flight,
+        after_request.delivered,
+    ) == (
+        before_cancel.pending,
+        before_cancel.in_flight,
+        before_cancel.delivered,
+    )
+    await repository.finish_attempt(
+        attempt_id=cancel_attempt.lease.attempt_id,
+        worker_id=cancel_attempt.lease.worker_id,
+        fencing_token=cancel_attempt.lease.fencing_token,
+        outcome=AttemptOutcome(status=AttemptOutcomeStatus.CANCELLED),
+    )
+
+    success_job, _ = await _create(repository, principal, "phase6-success")
+    success_attempt = await repository.claim_attempt(
+        worker_id="phase6-worker-success", lease_seconds=60, max_concurrent_jobs=1
+    )
+    assert success_attempt is not None
+    await repository.finish_attempt(
+        attempt_id=success_attempt.lease.attempt_id,
+        worker_id=success_attempt.lease.worker_id,
+        fencing_token=success_attempt.lease.fencing_token,
+        outcome=AttemptOutcome(
+            status=AttemptOutcomeStatus.COMPLETED,
+            pr_number=6,
+            pr_url="https://github.com/company/service/pull/6",
+            head_branch=f"mewcode/{success_job.id}",
+            head_sha="e" * 40,
+            verification_succeeded=True,
+        ),
+    )
+    async with database.sessions() as session:
+        delivered_types = set(
+            await session.scalars(select(NotificationOutboxRow.event_type))
+        )
+    assert delivered_types == {
+        "JOB_ACCEPTED",
+        "NEEDS_INPUT",
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+    }
+
+
+@pytest.mark.asyncio
+async def test_phase6_outbox_insert_failure_rolls_back_job_and_event(database) -> None:
+    repository = PlatformRepository(
+        database,
+        notifications_enabled=True,
+        notification_destination="feishu:" + "x" * 300,
+    )
+    _, principal = await _principal(repository, "phase6-atomic-rollback")
+    with pytest.raises(DBAPIError):
+        await _create(repository, principal, "phase6-atomic-rollback")
+    async with database.sessions() as session:
+        assert await session.scalar(select(func.count(JobRow.id))) == 0
+        assert await session.scalar(select(func.count(NotificationOutboxRow.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_phase6_notification_claim_fencing_recovery_and_retention(database) -> None:
+    repository = PlatformRepository(database, notifications_enabled=True)
+    _, principal = await _principal(repository, "phase6-fencing")
+    job, _ = await _create(repository, principal, "phase6-fencing")
+    first, competing = await asyncio.gather(
+        repository.claim_notification(notifier_id="notifier-a", lease_seconds=60),
+        repository.claim_notification(notifier_id="notifier-b", lease_seconds=60),
+    )
+    claimed = first or competing
+    assert claimed is not None
+    assert (first is None) != (competing is None)
+    assert not await repository.mark_notification_delivered(
+        notification_id=claimed.id,
+        notifier_id=claimed.notifier_id,
+        fencing_token=UUID(int=6),
+    )
+
+    async with database.sessions.begin() as session:
+        await session.execute(
+            update(NotificationOutboxRow)
+            .where(NotificationOutboxRow.id == claimed.id)
+            .values(lease_expires_at=func.now() - text("interval '1 second'"))
+        )
+    assert not await repository.mark_notification_delivered(
+        notification_id=claimed.id,
+        notifier_id=claimed.notifier_id,
+        fencing_token=claimed.fencing_token,
+    )
+    recovered = await repository.claim_notification(
+        notifier_id="notifier-recovery", lease_seconds=60
+    )
+    assert recovered is not None and recovered.id == claimed.id
+    assert recovered.fencing_token != claimed.fencing_token
+    assert not await repository.mark_notification_delivered(
+        notification_id=claimed.id,
+        notifier_id=claimed.notifier_id,
+        fencing_token=claimed.fencing_token,
+    )
+
+    async with database.sessions.begin() as session:
+        await session.execute(
+            update(JobRow)
+            .where(JobRow.id == job.id)
+            .values(
+                status=JobStatus.FAILED.value,
+                retention_until=func.now() - text("interval '1 second'"),
+            )
+        )
+    assert await repository.delete_expired_terminal_jobs() == 0
+    assert await repository.mark_notification_delivered(
+        notification_id=recovered.id,
+        notifier_id=recovered.notifier_id,
+        fencing_token=recovered.fencing_token,
+    )
+    assert (
+        await repository.claim_notification(
+            notifier_id="notifier-late", lease_seconds=60
+        )
+        is None
+    )
+    assert await repository.delete_expired_terminal_jobs() == 1
+
+
 @dataclass
 class _Resolver:
     async def resolve(self, **kwargs) -> RepositoryTarget:
@@ -661,6 +930,74 @@ async def test_api_fails_closed_without_repository_resolver(
     assert response.json()["error"]["code"] == "REPOSITORY_RESOLVER_UNAVAILABLE"
     async with database.sessions() as session:
         assert await session.scalar(select(func.count(JobRow.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_phase6_readiness_requires_fresh_worker_and_notifier(
+    database, postgres_settings
+) -> None:
+    settings = replace(postgres_settings, notifications_enabled=True)
+    repository = PlatformRepository(database, notifications_enabled=True)
+    app = create_app(
+        components=PlatformComponents(
+            settings=settings,
+            database=database,
+            repository=repository,
+        )
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await repository.register_worker("phase6-ready-worker")
+        missing = await client.get("/health/ready")
+        assert missing.status_code == 503
+        assert missing.json()["checks"]["worker"] is True
+        assert missing.json()["checks"]["notifier"] is False
+        await repository.register_service(
+            service_id="phase6-ready-notifier",
+            service_type="notifier",
+        )
+        ready = await client.get("/health/ready")
+        assert ready.status_code == 200
+        assert ready.json()["checks"]["notifier"] is True
+
+
+@pytest.mark.asyncio
+async def test_phase6_notifier_database_role_cannot_modify_business_tables(
+    database, postgres_settings
+) -> None:
+    roles = ("mewcode_api", "mewcode_worker", "mewcode_notifier")
+    created: list[str] = []
+    async with database.engine.begin() as connection:
+        for role in roles:
+            exists = await connection.scalar(
+                text("SELECT 1 FROM pg_roles WHERE rolname = :role"), {"role": role}
+            )
+            if exists is None:
+                await connection.execute(text(f"CREATE ROLE {role} NOLOGIN"))
+                created.append(role)
+    try:
+        assert await _grant_runtime_roles(postgres_settings) == 0
+        async with database.engine.connect() as connection:
+            for table in ("jobs", "attempts", "artifacts"):
+                allowed = await connection.scalar(
+                    text(
+                        "SELECT has_table_privilege("
+                        "'mewcode_notifier', :table, 'UPDATE')"
+                    ),
+                    {"table": table},
+                )
+                assert allowed is False
+            assert await connection.scalar(
+                text(
+                    "SELECT has_table_privilege("
+                    "'mewcode_notifier', 'notification_outbox', 'UPDATE')"
+                )
+            ) is True
+    finally:
+        async with database.engine.begin() as connection:
+            for role in reversed(created):
+                await connection.execute(text(f"DROP OWNED BY {role}"))
+                await connection.execute(text(f"DROP ROLE {role}"))
 
 
 class _CancellingProcessor:

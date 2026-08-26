@@ -2,7 +2,7 @@
 
 ## 1. 目的与范围
 
-本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App 与幂等 Draft PR SCM 链路已在 Phase 4 实现，Verification、可信 Artifact 与发布编排已在 Phase 5 实现，通知仍属于后续阶段。
+本文档定义内部单租户 MVP 在接收 Work Request、执行 Agent、运行 Verification、发布 GitHub Draft Pull Request 和投递通知时的安全边界。它是 Phase 0 起持续维护的测试依据；Docker ExecutionEnvironment 已在 Phase 2 实现，Control API 与 PostgreSQL 持久工作流已在 Phase 3 实现，GitHub App 与幂等 Draft PR SCM 链路已在 Phase 4 实现，Verification、可信 Artifact 与发布编排已在 Phase 5 实现，Transactional Outbox、飞书 Notifier 和可观测性已在 Phase 6 实现。
 
 MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、构建脚本、依赖代码、Agent 生成的命令和 Verification 命令全部视为不可信输入。内部单租户降低了身份和计费复杂度，但不降低仓库内容、供应链代码或提示注入的风险。
 
@@ -56,6 +56,10 @@ MVP 把 Requester、Work Request、附件、仓库内容、仓库指导文件、
 | `SCM-002` | force push、改写 base、修改 workflows、启用 LFS/submodule/hooks | SCM Adapter 固定 SHA、限制路径和发布操作；拒绝 Delivery | GitHub 测试仓库 | Phase 4 |
 | `VER-001` | Agent 跳过、替换或将非零 Verification 解释为成功 | 平台逐条运行原始 Verification Contract；任一失败均不发布 | Verification 集成测试 | Phase 1/5 |
 | `ART-001` | Executor 或仓库内容伪造、覆盖或泄漏 Verification 证据 | Executor 外可信存储、统一脱敏、原子写入、fencing 和哈希校验；证据不完整则不发布 | Artifact 与 Phase 5 live gate | Phase 5 |
+| `CRED-003` | Executor、Worker、API或日志读取飞书 webhook/签名 secret | 凭证只以只读 secret挂载到Notifier；统一 redactor覆盖配置、错误和异常栈 | Phase 6 secret canary与Compose挂载检查 | Phase 6 |
+| `NET-002` | 恶意或错误 webhook配置将Notifier变成SSRF客户端 | 仅允许固定HTTPS Feishu V2主机/路径；拒绝redirect、环境代理、userinfo、query和非标准端口 | webhook白名单与redirect测试 | Phase 6 |
+| `NTF-001` | 状态事务与通知分离导致漏发，或崩溃/并发导致不可审计重复 | 同事务Outbox、source sequence唯一键、租约、fencing和稳定Notification ID；明确at-least-once窗口 | PostgreSQL并发/恢复/迟到ACK测试与Phase 6 live gate | Phase 6 |
+| `OBS-001` | 日志、指标或卡片泄漏凭证/不可信内容，或高基数标签耗尽指标后端 | 结构化日志统一脱敏；卡片只用限长plain_text；指标只用固定枚举和route template | JSON日志、卡片注入、secret canary和指标标签测试 | Phase 6 |
 | `RACE-001` | 取消与发布并发导致 CANCELLED Job 遗留 PR | Artifact/清理完成后事务切换 PUBLISHING；该阶段拒绝取消 | PostgreSQL 行锁竞态测试 | Phase 5 |
 | `EVT-001` | 内存事件丢失、乱序或跨 Job 混合 | 持久化前绑定 job/attempt/sequence，SSE 只投影持久化事件 | JobEvent/恢复测试 | Phase 3 |
 | `AVAIL-001` | LLM、GitHub、飞书或 Worker 崩溃造成重复任务或重复 PR | 租约、幂等键、Outbox 和幂等 SCM 发布 | 崩溃与重复投递测试 | Phase 3/4/6/7 |
@@ -184,3 +188,27 @@ network 和 volume 均为零残留。验收实现提交 `9757b70` 的常规 GitH
 `32843118872` 与受保护 Phase 5 Live Gate run `32843163043` 均通过。后者在
 `phase4-github-live` Environment 中使用真实 PostgreSQL、Docker 和 GitHub App，验证
 失败无分支/PR、一次 Repair 后成功、重复发布幂等、证据脱敏以及 finally 资源清理。
+
+## 14. Phase 6 验收记录
+
+`CRED-003`、`NET-002`、`NTF-001` 和 `OBS-001` 已覆盖飞书凭证只挂载 Notifier、
+固定 webhook目的地、禁redirect/环境代理、同事务Outbox、租约/fencing、稳定
+Notification ID、plain_text卡片、结构化日志统一脱敏和低基数指标。飞书不可用只改变
+Outbox调度，不改变Job终态或API readiness。
+
+2026-08-26 在 Windows、Python 3.13、PostgreSQL 16 与 Docker Desktop Linux Engine
+上执行：
+
+```text
+默认无外部服务门禁：690 passed, 1 skipped, 31 deselected
+PostgreSQL门禁：19 passed
+Phase 6通知/可观测性定向门禁：19 passed
+Docker Executor安全门禁：7 passed
+隔离资源压力门禁：2 passed
+生产镜像：mewcode-platform:phase6-acceptance 构建通过，运行用户 65532:65532
+Docker Compose config：通过
+```
+
+唯一 skip仍是Windows symlink capability。受保护的 `platform_phase6_live` 手动工作流
+已经配置，但本地验收没有读取真实飞书凭证或向真实群投递；正式发布前由
+`phase6-feishu-live` Environment所有者手动执行并保留run证据。

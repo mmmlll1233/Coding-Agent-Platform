@@ -19,6 +19,7 @@ dependencies = [
     "asyncpg>=0.30,<1",
     "alembic>=1.14,<2",
     "pyjwt[crypto]>=2.12,<3",
+    "prometheus-client>=0.21,<1",
 ]
 
 [project.scripts]
@@ -47,4 +48,5 @@ markers = [
     "platform_postgres: requires the Phase 3 PostgreSQL integration database",
     "platform_github_live: requires a protected Phase 4 GitHub App test repository",
     "platform_phase5_live: requires protected PostgreSQL, Docker, and GitHub App integration",
+    "platform_phase6_live: requires protected PostgreSQL and a Feishu test group",
 ]

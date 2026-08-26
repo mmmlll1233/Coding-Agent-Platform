@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 
@@ -13,6 +14,8 @@ class PlatformSettingsError(ValueError):
 
 
 _IMMUTABLE_IMAGE = re.compile(r"^(?:sha256:[0-9a-f]{64}|[^\s@]+@sha256:[0-9a-f]{64})$")
+_NOTIFICATION_DESTINATION = re.compile(r"^feishu:[A-Za-z0-9._-]{1,64}$")
+_FEISHU_HOOK_PATH = re.compile(r"^/open-apis/bot/v2/hook/[A-Za-z0-9_-]+$")
 
 
 def _positive_int(env: dict[str, str], name: str, default: int) -> int:
@@ -110,7 +113,20 @@ class PlatformSettings:
     janitor_interval_seconds: int = 3600
     max_artifact_bytes: int = 64 * 1024 * 1024
     max_attempt_artifact_bytes: int = 128 * 1024 * 1024
+    notifications_enabled: bool = False
+    notification_destination: str = "feishu:platform"
+    feishu_webhook_url_file: str = ""
+    feishu_signing_secret_file: str = ""
+    notifier_id: str = ""
+    notification_poll_milliseconds: int = 500
+    notification_lease_seconds: int = 60
+    notification_timeout_seconds: int = 10
+    notification_backoff_base_seconds: int = 5
+    notification_backoff_max_seconds: int = 900
+    worker_metrics_port: int = 9091
+    notifier_metrics_port: int = 9092
     log_level: str = "INFO"
+    log_format: str = "text"
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> PlatformSettings:
@@ -133,7 +149,7 @@ class PlatformSettings:
             raise PlatformSettingsError(
                 "MEWCODE_PLATFORM_HEARTBEAT_SECONDS must be less than the lease"
             )
-        return cls(
+        settings = cls(
             database_url=database_url,
             database_password_file=env.get(
                 "MEWCODE_PLATFORM_DATABASE_PASSWORD_FILE", ""
@@ -234,8 +250,71 @@ class PlatformSettings:
                 "MEWCODE_PLATFORM_MAX_ATTEMPT_ARTIFACT_BYTES",
                 128 * 1024 * 1024,
             ),
+            notifications_enabled=_boolean(
+                env, "MEWCODE_PLATFORM_NOTIFICATIONS_ENABLED"
+            ),
+            notification_destination=env.get(
+                "MEWCODE_PLATFORM_NOTIFICATION_DESTINATION", "feishu:platform"
+            ).strip(),
+            feishu_webhook_url_file=env.get(
+                "MEWCODE_PLATFORM_FEISHU_WEBHOOK_URL_FILE", ""
+            ).strip(),
+            feishu_signing_secret_file=env.get(
+                "MEWCODE_PLATFORM_FEISHU_SIGNING_SECRET_FILE", ""
+            ).strip(),
+            notifier_id=env.get("MEWCODE_PLATFORM_NOTIFIER_ID", "").strip(),
+            notification_poll_milliseconds=_positive_int(
+                env, "MEWCODE_PLATFORM_NOTIFICATION_POLL_MILLISECONDS", 500
+            ),
+            notification_lease_seconds=_positive_int(
+                env, "MEWCODE_PLATFORM_NOTIFICATION_LEASE_SECONDS", 60
+            ),
+            notification_timeout_seconds=_positive_int(
+                env, "MEWCODE_PLATFORM_NOTIFICATION_TIMEOUT_SECONDS", 10
+            ),
+            notification_backoff_base_seconds=_positive_int(
+                env, "MEWCODE_PLATFORM_NOTIFICATION_BACKOFF_BASE_SECONDS", 5
+            ),
+            notification_backoff_max_seconds=_positive_int(
+                env, "MEWCODE_PLATFORM_NOTIFICATION_BACKOFF_MAX_SECONDS", 900
+            ),
+            worker_metrics_port=_positive_int(
+                env, "MEWCODE_PLATFORM_WORKER_METRICS_PORT", 9091
+            ),
+            notifier_metrics_port=_positive_int(
+                env, "MEWCODE_PLATFORM_NOTIFIER_METRICS_PORT", 9092
+            ),
             log_level=env.get("MEWCODE_PLATFORM_LOG_LEVEL", "INFO").upper(),
+            log_format=env.get("MEWCODE_PLATFORM_LOG_FORMAT", "text").lower(),
         )
+        if (
+            settings.notification_backoff_base_seconds
+            > settings.notification_backoff_max_seconds
+        ):
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_NOTIFICATION_BACKOFF_BASE_SECONDS must not exceed the maximum"
+            )
+        if (
+            settings.notification_timeout_seconds
+            >= settings.notification_lease_seconds
+        ):
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_NOTIFICATION_TIMEOUT_SECONDS must be less than the notification lease"
+            )
+        if not _NOTIFICATION_DESTINATION.fullmatch(settings.notification_destination):
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_NOTIFICATION_DESTINATION must be a logical feishu destination"
+            )
+        if (
+            settings.worker_metrics_port > 65535
+            or settings.notifier_metrics_port > 65535
+        ):
+            raise PlatformSettingsError("Platform metrics ports must be <= 65535")
+        if settings.log_format not in {"json", "text"}:
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_LOG_FORMAT must be json or text"
+            )
+        return settings
 
     def validate_worker(self) -> None:
         required = {
@@ -297,6 +376,49 @@ class PlatformSettings:
                 raise PlatformSettingsError(f"{name} cannot be read") from error
             if not value:
                 raise PlatformSettingsError(f"{name} is empty")
+
+    def notifier_secrets(self) -> tuple[str, str]:
+        required = {
+            "MEWCODE_PLATFORM_FEISHU_WEBHOOK_URL_FILE": self.feishu_webhook_url_file,
+            "MEWCODE_PLATFORM_FEISHU_SIGNING_SECRET_FILE": self.feishu_signing_secret_file,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise PlatformSettingsError(
+                "Notifier requires: " + ", ".join(sorted(missing))
+            )
+        values: list[str] = []
+        for name, path in required.items():
+            try:
+                value = Path(path).read_text(encoding="utf-8").strip()
+            except OSError as error:
+                raise PlatformSettingsError(f"{name} cannot be read") from error
+            if not value:
+                raise PlatformSettingsError(f"{name} is empty")
+            values.append(value)
+        return values[0], values[1]
+
+    def validate_notifier(self) -> tuple[str, str]:
+        if not self.notifications_enabled:
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_NOTIFICATIONS_ENABLED must be true for Notifier startup"
+            )
+        webhook_url, signing_secret = self.notifier_secrets()
+        parsed = urlsplit(webhook_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "open.feishu.cn"
+            or parsed.port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not _FEISHU_HOOK_PATH.fullmatch(parsed.path)
+        ):
+            raise PlatformSettingsError(
+                "MEWCODE_PLATFORM_FEISHU_WEBHOOK_URL_FILE must contain an approved Feishu V2 webhook"
+            )
+        return webhook_url, signing_secret
 
     @property
     def async_database_url(self) -> str:

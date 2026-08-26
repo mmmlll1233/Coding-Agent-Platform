@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ from mewcode.platform.domain import (
     ensure_attempt_transition,
     ensure_job_transition,
 )
+from mewcode.platform.execution import SensitiveValueRedactor
 
 from .database import Database
 from .orm import (
@@ -32,13 +33,22 @@ from .orm import (
     JobEventRow,
     JobInputRow,
     JobRow,
+    NotificationOutboxRow,
     RequesterRow,
     TenantRow,
     WorkerNodeRow,
 )
-from .ports import ArtifactMetadata
+from .ports import ArtifactMetadata, ClaimedNotification, NotificationOutboxStats
 
 CLAIM_ADVISORY_LOCK = 5_251_903_303
+
+NOTIFICATION_EVENT_TYPES = {
+    "job_received": "JOB_ACCEPTED",
+    "job_needs_input": "NEEDS_INPUT",
+    "job_succeeded": "SUCCEEDED",
+    "job_failed": "FAILED",
+    "job_cancelled": "CANCELLED",
+}
 
 
 class PersistenceError(RuntimeError):
@@ -98,10 +108,19 @@ class StoredEvent:
 
 class PlatformRepository:
     def __init__(
-        self, database: Database, *, metadata_retention_days: int = 30
+        self,
+        database: Database,
+        *,
+        metadata_retention_days: int = 30,
+        notifications_enabled: bool = False,
+        notification_destination: str = "feishu:platform",
+        redactor: SensitiveValueRedactor | None = None,
     ) -> None:
         self.database = database
         self.metadata_retention_days = metadata_retention_days
+        self.notifications_enabled = notifications_enabled
+        self.notification_destination = notification_destination
+        self.redactor = redactor or SensitiveValueRedactor(())
 
     @staticmethod
     async def _database_now(session: AsyncSession) -> datetime:
@@ -109,8 +128,8 @@ class PlatformRepository:
         assert isinstance(value, datetime)
         return value
 
-    @staticmethod
     async def _append_event(
+        self,
         session: AsyncSession,
         *,
         job_id: UUID,
@@ -140,6 +159,55 @@ class PlatformRepository:
             payload=payload or {},
         )
         session.add(event)
+        notification_type = NOTIFICATION_EVENT_TYPES.get(event_type)
+        if self.notifications_enabled and notification_type is not None:
+            job = await session.get(JobRow, job_id)
+            if job is None:
+                raise NotFound("Job does not exist")
+            notification_id = uuid4()
+            work_request = (
+                job.work_request if isinstance(job.work_request, dict) else {}
+            )
+            title = self.redactor.redact(str(work_request.get("title", "")))[:200]
+            envelope: dict[str, Any] = {
+                "schema_version": 1,
+                "notification_id": str(notification_id),
+                "job_id": str(job_id),
+                "source_event_sequence": int(sequence),
+                "event_type": notification_type,
+                "status": str((payload or {}).get("status", job.status)),
+                "repository": {
+                    "owner": self.redactor.redact(job.repo_owner)[:128],
+                    "name": self.redactor.redact(job.repo_name)[:128],
+                    "base_ref": self.redactor.redact(job.base_ref)[:255],
+                },
+                "title": title,
+                "attempt_no": job.current_attempt_no,
+            }
+            pr_url = (payload or {}).get("pr_url") or job.pr_url
+            if notification_type == "SUCCEEDED" and pr_url:
+                envelope["pr_url"] = str(pr_url)[:512]
+            if notification_type == "FAILED":
+                error_code = (payload or {}).get("error_code") or job.error_code
+                error_message = (payload or {}).get(
+                    "error_message"
+                ) or job.error_message
+                if error_code:
+                    envelope["error_code"] = self.redactor.redact(str(error_code))[:128]
+                if error_message:
+                    envelope["error_summary"] = self.redactor.redact(
+                        str(error_message)
+                    )[:1000]
+            session.add(
+                NotificationOutboxRow(
+                    id=notification_id,
+                    job_id=job_id,
+                    source_event_sequence=int(sequence),
+                    event_type=notification_type,
+                    destination=self.notification_destination,
+                    payload=envelope,
+                )
+            )
         return event
 
     async def ensure_requester(
@@ -561,6 +629,12 @@ class PlatformRepository:
                         JobRow.status.in_(terminal),
                         JobRow.retention_until.is_not(None),
                         JobRow.retention_until <= now,
+                        ~select(NotificationOutboxRow.id)
+                        .where(
+                            NotificationOutboxRow.job_id == JobRow.id,
+                            NotificationOutboxRow.status.in_(("PENDING", "IN_FLIGHT")),
+                        )
+                        .exists(),
                     )
                     .order_by(JobRow.retention_until, JobRow.id)
                     .limit(limit)
@@ -729,40 +803,209 @@ class PlatformRepository:
     async def register_worker(
         self, worker_id: str, metadata: dict[str, Any] | None = None
     ) -> None:
+        await self.register_service(
+            service_id=worker_id, service_type="worker", metadata=metadata
+        )
+
+    async def register_service(
+        self,
+        *,
+        service_id: str,
+        service_type: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if service_type not in {"worker", "notifier"}:
+            raise ValueError("service_type must be worker or notifier")
         async with self.database.sessions.begin() as session:
-            existing = await session.get(WorkerNodeRow, worker_id)
+            existing = await session.get(WorkerNodeRow, service_id)
             if existing is None:
                 session.add(
                     WorkerNodeRow(
-                        id=worker_id,
+                        id=service_id,
+                        service_type=service_type,
                         metadata_json=metadata or {},
                     )
                 )
             else:
+                if existing.service_type != service_type:
+                    raise StateConflict(
+                        "Service ID is already registered for another service type",
+                        code="SERVICE_TYPE_CONFLICT",
+                    )
                 existing.started_at = await self._database_now(session)
                 existing.heartbeat_at = existing.started_at
                 existing.metadata_json = metadata or {}
 
     async def heartbeat_worker(self, worker_id: str) -> bool:
+        return await self.heartbeat_service(service_id=worker_id, service_type="worker")
+
+    async def heartbeat_service(self, *, service_id: str, service_type: str) -> bool:
         async with self.database.sessions.begin() as session:
             result = await session.execute(
                 update(WorkerNodeRow)
-                .where(WorkerNodeRow.id == worker_id)
+                .where(
+                    WorkerNodeRow.id == service_id,
+                    WorkerNodeRow.service_type == service_type,
+                )
                 .values(heartbeat_at=func.now())
             )
             return result.rowcount == 1
 
     async def has_fresh_worker(self, stale_seconds: int) -> bool:
+        return await self.has_fresh_service(
+            service_type="worker", stale_seconds=stale_seconds
+        )
+
+    async def has_fresh_service(self, *, service_type: str, stale_seconds: int) -> bool:
         async with self.database.sessions() as session:
             now = await self._database_now(session)
             worker = await session.scalar(
                 select(WorkerNodeRow.id)
                 .where(
-                    WorkerNodeRow.heartbeat_at >= now - timedelta(seconds=stale_seconds)
+                    WorkerNodeRow.service_type == service_type,
+                    WorkerNodeRow.heartbeat_at
+                    >= now - timedelta(seconds=stale_seconds),
                 )
                 .limit(1)
             )
             return worker is not None
+
+    async def claim_notification(
+        self, *, notifier_id: str, lease_seconds: int
+    ) -> ClaimedNotification | None:
+        async with self.database.sessions.begin() as session:
+            now = await self._database_now(session)
+            row = await session.scalar(
+                select(NotificationOutboxRow)
+                .where(
+                    or_(
+                        (
+                            (NotificationOutboxRow.status == "PENDING")
+                            & (NotificationOutboxRow.next_attempt_at <= now)
+                        ),
+                        (
+                            (NotificationOutboxRow.status == "IN_FLIGHT")
+                            & (NotificationOutboxRow.lease_expires_at <= now)
+                        ),
+                    )
+                )
+                .order_by(
+                    NotificationOutboxRow.next_attempt_at,
+                    NotificationOutboxRow.created_at,
+                    NotificationOutboxRow.id,
+                )
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if row is None:
+                return None
+            fencing_token = uuid4()
+            row.status = "IN_FLIGHT"
+            row.locked_by = notifier_id
+            row.fencing_token = fencing_token
+            row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            row.attempt_count += 1
+            row.updated_at = now
+            await session.flush()
+            return ClaimedNotification(
+                id=row.id,
+                job_id=row.job_id,
+                source_event_sequence=row.source_event_sequence,
+                event_type=row.event_type,
+                destination=row.destination,
+                payload=dict(row.payload),
+                attempt_count=row.attempt_count,
+                notifier_id=notifier_id,
+                fencing_token=fencing_token,
+            )
+
+    async def mark_notification_delivered(
+        self,
+        *,
+        notification_id: UUID,
+        notifier_id: str,
+        fencing_token: UUID,
+    ) -> bool:
+        async with self.database.sessions.begin() as session:
+            result = await session.execute(
+                update(NotificationOutboxRow)
+                .where(
+                    NotificationOutboxRow.id == notification_id,
+                    NotificationOutboxRow.status == "IN_FLIGHT",
+                    NotificationOutboxRow.locked_by == notifier_id,
+                    NotificationOutboxRow.fencing_token == fencing_token,
+                    NotificationOutboxRow.lease_expires_at > func.now(),
+                )
+                .values(
+                    status="DELIVERED",
+                    locked_by=None,
+                    fencing_token=None,
+                    lease_expires_at=None,
+                    delivered_at=func.now(),
+                    updated_at=func.now(),
+                    last_error=None,
+                )
+            )
+            return result.rowcount == 1
+
+    async def retry_notification(
+        self,
+        *,
+        notification_id: UUID,
+        notifier_id: str,
+        fencing_token: UUID,
+        next_attempt_at: datetime,
+        error: str,
+    ) -> bool:
+        safe_error = self.redactor.redact(error)[:512]
+        async with self.database.sessions.begin() as session:
+            result = await session.execute(
+                update(NotificationOutboxRow)
+                .where(
+                    NotificationOutboxRow.id == notification_id,
+                    NotificationOutboxRow.status == "IN_FLIGHT",
+                    NotificationOutboxRow.locked_by == notifier_id,
+                    NotificationOutboxRow.fencing_token == fencing_token,
+                    NotificationOutboxRow.lease_expires_at > func.now(),
+                )
+                .values(
+                    status="PENDING",
+                    locked_by=None,
+                    fencing_token=None,
+                    lease_expires_at=None,
+                    next_attempt_at=next_attempt_at,
+                    updated_at=func.now(),
+                    last_error=safe_error,
+                )
+            )
+            return result.rowcount == 1
+
+    async def notification_outbox_stats(self) -> NotificationOutboxStats:
+        async with self.database.sessions() as session:
+            now = await self._database_now(session)
+            counts = {
+                status: int(count)
+                for status, count in (
+                    await session.execute(
+                        select(
+                            NotificationOutboxRow.status,
+                            func.count(NotificationOutboxRow.id),
+                        ).group_by(NotificationOutboxRow.status)
+                    )
+                ).all()
+            }
+            oldest = await session.scalar(
+                select(func.min(NotificationOutboxRow.created_at)).where(
+                    NotificationOutboxRow.status.in_(("PENDING", "IN_FLIGHT"))
+                )
+            )
+            oldest_seconds = max(0.0, (now - oldest).total_seconds()) if oldest else 0.0
+            return NotificationOutboxStats(
+                pending=counts.get("PENDING", 0),
+                in_flight=counts.get("IN_FLIGHT", 0),
+                delivered=counts.get("DELIVERED", 0),
+                oldest_pending_seconds=oldest_seconds,
+            )
 
     async def claim_attempt(
         self,
