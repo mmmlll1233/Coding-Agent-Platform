@@ -7,6 +7,8 @@ import io
 import json
 import logging
 import posixpath
+import re
+import shutil
 import socket as stdlib_socket
 import tarfile
 import time
@@ -151,6 +153,38 @@ def cleanup_orphaned_attempt_resources(
     finally:
         if owned_client:
             client.close()
+
+
+def cleanup_orphaned_attempt_state(
+    state_root: Path,
+    active_attempts: set[tuple[str, str]] | frozenset[tuple[str, str]],
+) -> int:
+    attempts_root = (Path(state_root).resolve() / "attempts").resolve()
+    if not attempts_root.exists():
+        return 0
+    active_keys = {
+        hashlib.sha256(f"{job_id}\0{attempt_id}".encode()).hexdigest()[:32]
+        for job_id, attempt_id in active_attempts
+    }
+    removed = 0
+    errors: list[str] = []
+    for candidate in attempts_root.iterdir():
+        if not re.fullmatch(r"[0-9a-f]{32}", candidate.name):
+            continue
+        resolved = candidate.resolve()
+        if resolved.parent != attempts_root or candidate.is_symlink():
+            errors.append(f"unsafe Attempt state path: {candidate.name}")
+            continue
+        if candidate.name in active_keys:
+            continue
+        try:
+            shutil.rmtree(resolved)
+            removed += 1
+        except OSError as exc:
+            errors.append(f"Attempt state removal: {exc}")
+    if errors:
+        raise ExecutionCleanupError("; ".join(errors))
+    return removed
 
 
 def _tar_bytes(

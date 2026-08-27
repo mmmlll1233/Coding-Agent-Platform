@@ -32,7 +32,7 @@ Invoke-WebRequest http://127.0.0.1:8080/health/ready
 docker compose -f compose.platform.yml -p mewcode-platform stop worker
 ```
 
-Worker先停止领取，再等待活动 Attempt最多300秒。超时后 Processor取消并清理 Executor；Job保持受原 Lease保护，重启后在 Lease到期时自动恢复。硬杀只用于故障演练；不得删除 Attempt数据库行或手工复用 fencing token。Worker重启后先等待原 Lease过期，恢复循环把旧 Attempt移出数据库活跃白名单，再按 MewCode管理标签回收其孤儿容器、Attempt网络和卷；共享 egress网络不会被该回收器删除。
+Worker先停止领取，再等待活动 Attempt最多300秒。超时后 Processor取消并清理 Executor；Job保持受原 Lease保护，重启后在 Lease到期时自动恢复。硬杀只用于故障演练；不得删除 Attempt数据库行或手工复用 fencing token。Worker重启后先等待原 Lease过期，恢复循环把旧 Attempt移出数据库活跃白名单，再按 MewCode管理标签回收其孤儿容器、Attempt网络和卷，并删除 `state_root/attempts`下对应的固定哈希状态目录；共享 egress网络不会被该回收器删除。
 
 部署新容量值前先排空全部 Worker。活跃 Worker的全局值不一致会以 `CAPACITY_CONFIGURATION_MISMATCH` 拒绝后来者；本地槽位可不同，但每个 Worker的槽位不得超过全局上限。
 

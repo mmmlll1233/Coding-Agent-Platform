@@ -222,9 +222,10 @@ Outbox可观察字段。两项测试飞书 Environment secret在run结束后已�
 `RES-001`、`AVAIL-001`、`CAP-001` 和 `OPS-001` 的无凭证部分已加入自动化覆盖：
 规范化 Repository Size含symlink目标并按2GiB fail closed；Attempt Processor和Executor
 共享最大3600秒配置；Worker Drain、容量漂移拒绝、全局领取上限、5并发屏障/第6个排队、
-数据库活跃 Attempt白名单驱动的硬杀后孤儿 Docker资源回收、备份摘要校验和验收证据
-凭证扫描均有测试。回收器要求 MewCode管理标签与 Attempt ID标签同时存在，不触碰共享
-egress网络或非平台资源。现有恶意仓库夹具继续作为安全清单，不得删除。
+数据库活跃 Job/Attempt白名单驱动的硬杀后孤儿 Docker资源和固定哈希状态目录回收、
+备份摘要校验和验收证据凭证扫描均有测试。Docker回收器要求 MewCode管理标签与
+Attempt ID标签同时存在，状态回收器只接受 `state_root/attempts`的32位哈希直接子目录；
+两者均不触碰共享 egress网络或非平台资源。现有恶意仓库夹具继续作为安全清单，不得删除。
 
 正式本地安全结论仍为待验收：实际2GiB I/O、真实3600秒、连续20个 Job、两次真实飞书、
 PR发布后崩溃对账及空环境恢复必须在同一固定实现 SHA上完成。任何原始 secret、webhook、

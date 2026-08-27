@@ -39,6 +39,7 @@ from mewcode.platform.execution import (
     ExecutionLimits,
     SensitiveValueRedactor,
     cleanup_orphaned_attempt_resources,
+    cleanup_orphaned_attempt_state,
 )
 from mewcode.platform.persistence import PlatformRepository, StateConflict
 from mewcode.platform.runtime import (
@@ -916,11 +917,22 @@ class ProductionAttemptProcessorFactory:
     async def cleanup_expired(self) -> tuple[int, int]:
         return await self.artifact_service.cleanup_expired()
 
-    async def cleanup_orphaned(self) -> tuple[int, int, int]:
-        active = await self.repository.live_attempt_ids()
-        return await asyncio.to_thread(
+    async def cleanup_orphaned(self) -> tuple[int, int, int, int]:
+        active = await self.repository.live_attempts()
+        state_removed = await asyncio.to_thread(
+            cleanup_orphaned_attempt_state,
+            Path(self.settings.state_root),
+            {(str(job_id), str(attempt_id)) for job_id, attempt_id in active},
+        )
+        docker_removed = await asyncio.to_thread(
             cleanup_orphaned_attempt_resources,
-            {str(attempt_id) for attempt_id in active},
+            {str(attempt_id) for _, attempt_id in active},
+        )
+        return (
+            docker_removed[0],
+            docker_removed[1],
+            docker_removed[2],
+            state_removed,
         )
 
 

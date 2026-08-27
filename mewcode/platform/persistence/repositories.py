@@ -1567,13 +1567,18 @@ class PlatformRepository:
                 recovered += 1
         return recovered
 
-    async def live_attempt_ids(self) -> frozenset[UUID]:
+    async def live_attempts(self) -> frozenset[tuple[UUID, UUID]]:
         async with self.database.sessions() as session:
             now = await self._database_now(session)
-            values = await session.scalars(
-                select(AttemptRow.id).where(
+            rows = await session.execute(
+                select(AttemptRow.job_id, AttemptRow.id).where(
                     AttemptRow.status == AttemptStatus.RUNNING.value,
                     AttemptRow.lease_expires_at > now,
                 )
             )
-            return frozenset(values.all())
+            return frozenset(
+                (job_id, attempt_id) for job_id, attempt_id in rows.all()
+            )
+
+    async def live_attempt_ids(self) -> frozenset[UUID]:
+        return frozenset(attempt_id for _, attempt_id in await self.live_attempts())

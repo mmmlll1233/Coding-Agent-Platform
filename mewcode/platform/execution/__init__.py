@@ -8,7 +8,11 @@ from .base import (
     WorkspacePathError,
 )
 from .fake import FakeExecutionEnvironment, InMemoryWorkspaceAccess
-from .docker import DockerExecutionEnvironment, cleanup_orphaned_attempt_resources
+from .docker import (
+    DockerExecutionEnvironment,
+    cleanup_orphaned_attempt_resources,
+    cleanup_orphaned_attempt_state,
+)
 from .models import (
     AttemptExecutionSpec,
     ExecutionCommand,
@@ -47,4 +51,5 @@ __all__ = [
     "WorkspaceWriteResult",
     "create_platform_registry",
     "cleanup_orphaned_attempt_resources",
+    "cleanup_orphaned_attempt_state",
 ]

@@ -6,7 +6,7 @@ Phase 7 保持 Control API 和 Artifact 类型不变，硬化以下运行边界�
 
 - `MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS` 是 PostgreSQL 强制的 Platform Capacity；新增 `MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS` 作为 Worker Slot，默认均为 `1`。活跃 Worker 声明不同 Platform Capacity 时以 `CAPACITY_CONFIGURATION_MISMATCH` 拒绝启动。
 - Worker 收到停止请求后发布 `draining=true`、停止领取、继续维护活动 Lease；默认等待 `MEWCODE_PLATFORM_WORKER_SHUTDOWN_GRACE_SECONDS=300`，之后取消 Processor并让过期 Lease按现有一次自动恢复规则接管。Compose `stop_grace_period` 为330秒。
-- Worker恢复循环在数据库租约恢复后，以仍存活的 Attempt ID作为白名单，只清理由 `com.mewcode.managed=true`和 `com.mewcode.attempt_id`共同标记的孤儿容器、Attempt网络和卷；共享 egress网络没有 Attempt标签，不在回收范围。该路径用于硬杀进程后的资源收敛，并拒绝全局 prune。
+- Worker恢复循环在数据库租约恢复后，以仍存活的 Job/Attempt ID作为白名单，只清理由 `com.mewcode.managed=true`和 `com.mewcode.attempt_id`共同标记的孤儿容器、Attempt网络和卷，以及 `state_root/attempts`下不在白名单中的固定哈希状态目录；共享 egress网络没有 Attempt标签，不在回收范围。该路径用于硬杀进程后的资源与临时归档收敛，并拒绝全局 prune。
 - `MEWCODE_PLATFORM_ATTEMPT_TIMEOUT_SECONDS` 默认且最大为3600。每个 Attempt独立计时，排队和 `NEEDS_INPUT` 不计入；超时错误码为 `ATTEMPT_DEADLINE_EXCEEDED`，清理/幂等发布对账最多额外使用30秒。
 - Repository Size按规范化固定 SHA工作树中的普通文件和symlink目标字节计算，默认上限2GiB；GitHub压缩归档下载另有2.25GiB硬上限，Executor Workspace仍为3GiB。
 - Worker指标新增全局/本地容量、排空状态、排队数量、最老排队年龄和停机结果；readiness忽略正在排空的 Worker。

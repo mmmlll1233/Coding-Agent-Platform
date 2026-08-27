@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import tarfile
 import time
@@ -20,6 +21,7 @@ from mewcode.platform.execution import (
     SensitiveValueRedactor,
     WorkspacePathError,
     cleanup_orphaned_attempt_resources,
+    cleanup_orphaned_attempt_state,
     create_platform_registry,
 )
 from mewcode.platform.execution import docker as docker_execution
@@ -197,6 +199,24 @@ def test_orphan_cleanup_keeps_live_attempt_and_ignores_unmanaged_resources() -> 
     assert orphan_container.removed is True
     assert orphan_network.removed is True
     assert orphan_volume.removed is True
+
+
+def test_orphan_state_cleanup_keeps_live_and_unrecognized_directories(tmp_path) -> None:
+    active = ("job-live", "attempt-live")
+    orphan = ("job-orphan", "attempt-orphan")
+    attempts_root = tmp_path / "state" / "attempts"
+    active_key = hashlib.sha256(f"{active[0]}\0{active[1]}".encode()).hexdigest()[:32]
+    orphan_key = hashlib.sha256(f"{orphan[0]}\0{orphan[1]}".encode()).hexdigest()[:32]
+    (attempts_root / active_key).mkdir(parents=True)
+    (attempts_root / orphan_key).mkdir()
+    (attempts_root / "operator-notes").mkdir()
+
+    removed = cleanup_orphaned_attempt_state(tmp_path / "state", {active})
+
+    assert removed == 1
+    assert (attempts_root / active_key).is_dir()
+    assert not (attempts_root / orphan_key).exists()
+    assert (attempts_root / "operator-notes").is_dir()
 
 
 @pytest.mark.asyncio

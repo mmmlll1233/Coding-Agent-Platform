@@ -1137,9 +1137,9 @@ class _OrphanCleanupFactory:
     def create(self, lease: AttemptLease):
         raise AssertionError("No Job should be claimed in this cleanup test")
 
-    async def cleanup_orphaned(self) -> tuple[int, int, int]:
+    async def cleanup_orphaned(self) -> tuple[int, int, int, int]:
         self.cleaned.set()
-        return 2, 1, 3
+        return 2, 1, 3, 1
 
 
 @pytest.mark.asyncio

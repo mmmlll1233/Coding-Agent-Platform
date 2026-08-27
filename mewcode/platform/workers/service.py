@@ -114,7 +114,7 @@ class WorkerService:
                     if any(removed):
                         log.warning(
                             "Removed orphan Attempt Docker resources "
-                            "containers=%s networks=%s volumes=%s",
+                            "containers=%s networks=%s volumes=%s state_dirs=%s",
                             *removed,
                         )
                 except Exception:

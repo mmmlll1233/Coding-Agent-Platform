@@ -17,6 +17,7 @@ from mewcode.platform.execution import (
     ExecutionLimits,
     WorkspacePathError,
     cleanup_orphaned_attempt_resources,
+    cleanup_orphaned_attempt_state,
     create_platform_registry,
 )
 from mewcode.tools.read_file import Params as ReadParams
@@ -442,6 +443,10 @@ async def test_worker_restart_sweeps_only_orphan_attempt_resources(
             client=client,
         )
         assert protected == (0, 0, 0)
+        assert cleanup_orphaned_attempt_state(
+            environment.spec.trusted_state_dir.parents[1],
+            {(environment.spec.job_id, attempt_id)},
+        ) == 0
 
         removed = await asyncio.to_thread(
             cleanup_orphaned_attempt_resources,
@@ -449,6 +454,10 @@ async def test_worker_restart_sweeps_only_orphan_attempt_resources(
             client=client,
         )
         assert removed == (2, 1, 3)
+        assert cleanup_orphaned_attempt_state(
+            environment.spec.trusted_state_dir.parents[1],
+            set(),
+        ) == 1
 
         filters = _labels(environment.spec.job_id, attempt_id)
         assert client.containers.list(all=True, filters=filters) == []
