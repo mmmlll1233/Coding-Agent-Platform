@@ -47,6 +47,7 @@ Worker先停止领取，再等待活动 Attempt最多300秒。超时后 Processo
 - `worker=false`：检查 Worker日志、是否处于 Drain、容量配置是否冲突以及 heartbeat年龄。
 - `ATTEMPT_DEADLINE_EXCEEDED`：下载四类 Artifact确认最后阶段；超时不得继续 Agent/Verification或创建未对账 PR。
 - `WORKER_LEASE_EXPIRED`：第一次会创建新 Attempt；第二次结束 Job。迟到 Worker写入应被 fencing拒绝。
+- GitHub `GITHUB_UNAVAILABLE`/`SCM_UNAVAILABLE`：先检查出口代理和 GitHub状态。平台只对只读请求、归档下载和 installation-token签发做有界短退避；写入失败依赖固定 Job Delivery分支/PR重放对账，禁止手工重跑任意 Git push。
 - Notifier backlog增长：Job终态仍有效。恢复飞书后等待重试；正常并发不重复，但飞书接受后 ACK落库前崩溃仍可能出现相同 Notification ID卡片。
 - 磁盘不足：停止接收、排空 Worker，检查命名卷和保留策略；只删除明确过期 Artifact，禁止 `docker system prune` 或无范围的 volume删除。
 

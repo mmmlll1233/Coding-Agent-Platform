@@ -21,6 +21,7 @@ from mewcode.platform.domain import (
 )
 from mewcode.platform.execution import SensitiveValueRedactor
 from mewcode.platform.scm import (
+    GitHubAppCache,
     GitHubAppClient,
     GitHubConflict,
     GitHubRejected,
@@ -155,6 +156,92 @@ async def test_github_resolver_scopes_token_and_pins_branch(tmp_path: Path) -> N
     await http.aclose()
 
 
+@pytest.mark.asyncio
+async def test_github_installation_token_cache_is_shared_and_permission_scoped(
+    tmp_path: Path,
+) -> None:
+    issued: list[dict] = []
+    token = "ghs_1234567890_shared_process_cache_token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app/installations/7/access_tokens"
+        issued.append(json.loads(request.content))
+        return httpx.Response(
+            201,
+            json={"token": token, "expires_at": "2027-02-01T00:00:00Z"},
+        )
+
+    http = httpx.AsyncClient(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    cache = GitHubAppCache()
+    key = _private_key(tmp_path / "app.pem")
+    first = GitHubAppClient(
+        client_id="Iv1.phase4",
+        private_key_file=key,
+        http_client=http,
+        clock=lambda: 1_800_000_000,
+        app_cache=cache,
+    )
+    second = GitHubAppClient(
+        client_id="Iv1.phase4",
+        private_key_file=key,
+        http_client=http,
+        clock=lambda: 1_800_000_000,
+        app_cache=cache,
+    )
+    assert await first.installation_token(
+        installation_id=7,
+        repository="Repo",
+        permissions={"contents": "read"},
+    ) == token
+    assert await second.installation_token(
+        installation_id=7,
+        repository="repo",
+        permissions={"contents": "read"},
+    ) == token
+    assert len(issued) == 1
+    assert await second.installation_token(
+        installation_id=7,
+        repository="repo",
+        permissions={"contents": "write"},
+    ) == token
+    assert len(issued) == 2
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_github_installation_token_retries_a_transient_failure(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503)
+        return httpx.Response(
+            201, json={"token": "ghs_1234567890_retry_token_value"}
+        )
+
+    http = httpx.AsyncClient(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    client = GitHubAppClient(
+        client_id="Iv1.phase4",
+        private_key_file=_private_key(tmp_path / "app.pem"),
+        http_client=http,
+    )
+    assert await client.installation_token(
+        installation_id=7,
+        repository="repo",
+        permissions={"contents": "read"},
+    ) == "ghs_1234567890_retry_token_value"
+    assert calls == 2
+    await http.aclose()
+
+
 def test_github_client_rejects_invalid_private_key(tmp_path: Path) -> None:
     key = tmp_path / "invalid.pem"
     key.write_text("not an RSA key", encoding="utf-8")
@@ -261,6 +348,30 @@ async def test_resolver_maps_timeout_to_stable_unavailable(tmp_path: Path) -> No
         )
     assert caught.value.code == "GITHUB_UNAVAILABLE"
     assert "secret" not in str(caught.value)
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_github_read_retries_a_transient_failure(tmp_path: Path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"id": 7, "suspended_at": None})
+
+    http = httpx.AsyncClient(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    client = GitHubAppClient(
+        client_id="Iv1.phase4",
+        private_key_file=_private_key(tmp_path / "app.pem"),
+        http_client=http,
+    )
+    assert (await client.get_installation(7))["id"] == 7
+    assert calls == 2
     await http.aclose()
 
 

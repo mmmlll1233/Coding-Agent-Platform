@@ -5,6 +5,7 @@ from mewcode.platform.settings import PlatformSettings
 
 from .adapter import GitHubScmAdapter
 from .client import (
+    GitHubAppCache,
     GitHubAppClient,
     GitHubConflict,
     GitHubError,
@@ -23,6 +24,8 @@ from .errors import (
 
 def create_repository_resolver(
     settings: PlatformSettings,
+    *,
+    app_cache: GitHubAppCache | None = None,
 ) -> GitHubRepositoryTargetResolver:
     redactor = shared_platform_redactor()
     client = GitHubAppClient(
@@ -30,17 +33,23 @@ def create_repository_resolver(
         private_key_file=settings.github_private_key_file,
         timeout_seconds=settings.github_timeout_seconds,
         redactor=redactor,
+        app_cache=app_cache,
     )
     return GitHubRepositoryTargetResolver(client)
 
 
-def create_scm_adapter(settings: PlatformSettings) -> GitHubScmAdapter:
+def create_scm_adapter(
+    settings: PlatformSettings,
+    *,
+    app_cache: GitHubAppCache | None = None,
+) -> GitHubScmAdapter:
     redactor = shared_platform_redactor()
     client = GitHubAppClient(
         client_id=settings.github_app_client_id,
         private_key_file=settings.github_private_key_file,
         timeout_seconds=settings.github_timeout_seconds,
         redactor=redactor,
+        app_cache=app_cache,
     )
     return GitHubScmAdapter(
         client,
@@ -52,6 +61,7 @@ def create_scm_adapter(settings: PlatformSettings) -> GitHubScmAdapter:
 
 __all__ = [
     "GitHubAppClient",
+    "GitHubAppCache",
     "GitHubConflict",
     "GitHubError",
     "GitHubRejected",

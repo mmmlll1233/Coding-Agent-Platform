@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -15,6 +18,7 @@ from mewcode.platform.execution import SensitiveValueRedactor
 API_VERSION = "2026-03-10"
 API_ORIGIN = "https://api.github.com"
 ARCHIVE_ORIGIN = "https://codeload.github.com"
+_TRANSIENT_ATTEMPTS = 3
 
 
 class GitHubError(RuntimeError):
@@ -33,6 +37,40 @@ class GitHubConflict(GitHubError):
     pass
 
 
+class _TransientArchiveDownload(GitHubUnavailable):
+    pass
+
+
+@dataclass(frozen=True)
+class _CachedInstallationToken:
+    token: str
+    expires_at: float
+
+
+class GitHubAppCache:
+    """Process-local GitHub App cache; values are never persisted."""
+
+    def __init__(self) -> None:
+        self._tokens: dict[tuple[Any, ...], _CachedInstallationToken] = {}
+        self._token_locks: dict[tuple[Any, ...], asyncio.Lock] = {}
+
+    async def installation_token(
+        self,
+        key: tuple[Any, ...],
+        *,
+        now: float,
+        issue: Callable[[], Awaitable[_CachedInstallationToken]],
+    ) -> str:
+        lock = self._token_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._tokens.get(key)
+            if cached is not None and cached.expires_at - now > 60:
+                return cached.token
+            issued = await issue()
+            self._tokens[key] = issued
+            return issued.token
+
+
 class GitHubAppClient:
     """Small fail-closed GitHub.com client for the trusted SCM boundary."""
 
@@ -45,6 +83,7 @@ class GitHubAppClient:
         redactor: SensitiveValueRedactor | None = None,
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.time,
+        app_cache: GitHubAppCache | None = None,
     ) -> None:
         if not client_id.strip():
             raise ValueError("GitHub App client ID is required")
@@ -65,6 +104,7 @@ class GitHubAppClient:
             *(line.strip() for line in key_text.splitlines() if len(line.strip()) >= 16),
         )
         self._clock = clock
+        self._app_cache = app_cache or GitHubAppCache()
         # Validate the PEM at startup, before accepting Work Requests.
         try:
             self._app_jwt()
@@ -112,16 +152,38 @@ class GitHubAppClient:
         conflict_ok: bool = False,
     ) -> Any | None:
         auth = self._app_jwt() if app_auth else token
-        try:
-            response = await self._http.request(
-                method,
-                path,
-                headers=self._headers(auth),
-                json=dict(json_body) if json_body is not None else None,
-                params=dict(params) if params is not None else None,
-            )
-        except httpx.TransportError as error:
-            raise GitHubUnavailable("GitHub is temporarily unavailable") from error
+        attempts = (
+            _TRANSIENT_ATTEMPTS if method.upper() in {"GET", "HEAD"} else 1
+        )
+        response: httpx.Response | None = None
+        last_transport: httpx.TransportError | None = None
+        for attempt in range(attempts):
+            try:
+                response = await self._http.request(
+                    method,
+                    path,
+                    headers=self._headers(auth),
+                    json=dict(json_body) if json_body is not None else None,
+                    params=dict(params) if params is not None else None,
+                )
+            except httpx.TransportError as error:
+                last_transport = error
+                if attempt + 1 >= attempts:
+                    raise GitHubUnavailable(
+                        "GitHub is temporarily unavailable"
+                    ) from error
+                await asyncio.sleep(0.5 * (2**attempt))
+                continue
+            if (
+                response.status_code == 429 or response.status_code >= 500
+            ) and attempt + 1 < attempts:
+                await asyncio.sleep(0.5 * (2**attempt))
+                continue
+            break
+        if response is None:
+            raise GitHubUnavailable(
+                "GitHub is temporarily unavailable"
+            ) from last_transport
         if 200 <= response.status_code < 300:
             if response.status_code == 204 or not response.content:
                 return None
@@ -153,20 +215,64 @@ class GitHubAppClient:
         repository: str,
         permissions: Mapping[str, str],
     ) -> str:
-        value = await self.request_json(
-            "POST",
-            f"/app/installations/{installation_id}/access_tokens",
-            app_auth=True,
-            json_body={
-                "repositories": [repository],
-                "permissions": dict(permissions),
-            },
+        cache_key = (
+            self.client_id,
+            int(installation_id),
+            repository.casefold(),
+            tuple(
+                sorted(
+                    (str(name), str(level))
+                    for name, level in permissions.items()
+                )
+            ),
         )
-        if not isinstance(value, dict) or not isinstance(value.get("token"), str):
-            raise GitHubUnavailable("GitHub returned an invalid installation token")
-        token = value["token"]
-        if len(token) < 20:
-            raise GitHubUnavailable("GitHub returned an invalid installation token")
+
+        async def issue() -> _CachedInstallationToken:
+            value = None
+            for attempt in range(_TRANSIENT_ATTEMPTS):
+                try:
+                    value = await self.request_json(
+                        "POST",
+                        f"/app/installations/{installation_id}/access_tokens",
+                        app_auth=True,
+                        json_body={
+                            "repositories": [repository],
+                            "permissions": dict(permissions),
+                        },
+                    )
+                    break
+                except GitHubUnavailable:
+                    if attempt + 1 >= _TRANSIENT_ATTEMPTS:
+                        raise
+                    await asyncio.sleep(0.5 * (2**attempt))
+            if not isinstance(value, dict) or not isinstance(
+                value.get("token"), str
+            ):
+                raise GitHubUnavailable(
+                    "GitHub returned an invalid installation token"
+                )
+            token = value["token"]
+            if len(token) < 20:
+                raise GitHubUnavailable(
+                    "GitHub returned an invalid installation token"
+                )
+            expires_at = self._clock() + 300
+            raw_expiry = value.get("expires_at")
+            if isinstance(raw_expiry, str):
+                try:
+                    parsed = datetime.fromisoformat(
+                        raw_expiry.replace("Z", "+00:00")
+                    )
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    expires_at = parsed.timestamp()
+                except ValueError:
+                    pass
+            return _CachedInstallationToken(token=token, expires_at=expires_at)
+
+        token = await self._app_cache.installation_token(
+            cache_key, now=self._clock(), issue=issue
+        )
         self.redactor.add(token)
         return token
 
@@ -185,47 +291,73 @@ class GitHubAppClient:
             f"tarball/{quote(revision, safe='')}"
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.unlink(missing_ok=True)
-        try:
-            response = await self._http.get(
-                path, headers=self._headers(token), follow_redirects=False
-            )
-        except httpx.TransportError as error:
-            raise GitHubUnavailable("GitHub archive download failed") from error
-        if response.status_code == 429 or response.status_code >= 500:
-            raise GitHubUnavailable("GitHub archive download is unavailable")
-        if response.status_code not in {301, 302, 303, 307, 308}:
-            if response.status_code in {401, 403, 404}:
-                raise GitHubRejected("Repository archive is not accessible")
-            raise GitHubUnavailable("GitHub returned an invalid archive redirect")
-        location = response.headers.get("location", "")
-        parsed = urlparse(location)
-        if (
-            parsed.scheme != "https"
-            or f"{parsed.scheme}://{parsed.netloc}" != ARCHIVE_ORIGIN
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise GitHubUnavailable("GitHub returned an untrusted archive redirect")
-        total = 0
-        try:
-            async with self._http.stream(
-                "GET", location, headers=self._headers(), follow_redirects=False
-            ) as archive:
-                if archive.status_code != 200:
-                    raise GitHubUnavailable("GitHub archive download failed")
-                with destination.open("wb") as output:
-                    async for chunk in archive.aiter_bytes():
-                        total += len(chunk)
-                        if total > max_bytes:
-                            raise GitHubRejected("Repository archive exceeds 2 GiB")
-                        output.write(chunk)
-        except (GitHubRejected, GitHubUnavailable):
+        for attempt in range(_TRANSIENT_ATTEMPTS):
             destination.unlink(missing_ok=True)
-            raise
-        except (httpx.TransportError, OSError) as error:
-            destination.unlink(missing_ok=True)
-            raise GitHubUnavailable("GitHub archive download failed") from error
+            try:
+                response = await self._http.get(
+                    path, headers=self._headers(token), follow_redirects=False
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise _TransientArchiveDownload(
+                        "GitHub archive download is unavailable"
+                    )
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    if response.status_code in {401, 403, 404}:
+                        raise GitHubRejected(
+                            "Repository archive is not accessible"
+                        )
+                    raise GitHubUnavailable(
+                        "GitHub returned an invalid archive redirect"
+                    )
+                location = response.headers.get("location", "")
+                parsed = urlparse(location)
+                if (
+                    parsed.scheme != "https"
+                    or f"{parsed.scheme}://{parsed.netloc}" != ARCHIVE_ORIGIN
+                    or parsed.username is not None
+                    or parsed.password is not None
+                ):
+                    raise GitHubUnavailable(
+                        "GitHub returned an untrusted archive redirect"
+                    )
+                total = 0
+                async with self._http.stream(
+                    "GET", location, headers=self._headers(), follow_redirects=False
+                ) as archive:
+                    if archive.status_code != 200:
+                        if archive.status_code == 429 or archive.status_code >= 500:
+                            raise _TransientArchiveDownload(
+                                "GitHub archive download failed"
+                            )
+                        raise GitHubUnavailable("GitHub archive download failed")
+                    with destination.open("wb") as output:
+                        async for chunk in archive.aiter_bytes():
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise GitHubRejected(
+                                    "Repository archive exceeds 2 GiB"
+                                )
+                            output.write(chunk)
+                return
+            except GitHubRejected:
+                destination.unlink(missing_ok=True)
+                raise
+            except (
+                _TransientArchiveDownload,
+                httpx.TransportError,
+                OSError,
+            ) as error:
+                destination.unlink(missing_ok=True)
+                if attempt + 1 >= _TRANSIENT_ATTEMPTS:
+                    if isinstance(error, _TransientArchiveDownload):
+                        raise GitHubUnavailable(str(error)) from error
+                    raise GitHubUnavailable(
+                        "GitHub archive download failed"
+                    ) from error
+                await asyncio.sleep(0.5 * (2**attempt))
+            except GitHubUnavailable:
+                destination.unlink(missing_ok=True)
+                raise
 
     async def aclose(self) -> None:
         if self._owns_http:

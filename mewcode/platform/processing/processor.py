@@ -53,6 +53,7 @@ from mewcode.platform.runtime import (
     RuntimeProfile,
 )
 from mewcode.platform.scm import (
+    GitHubAppCache,
     NoChangesError,
     ScmDeliveryConflict,
     ScmPolicyError,
@@ -893,6 +894,7 @@ class ProductionAttemptProcessorFactory:
         self.settings = settings
         self.repository = repository
         self.redactor = redactor
+        self.github_app_cache = GitHubAppCache()
         self.artifact_service = ArtifactService(
             repository,
             LocalArtifactStore(settings.artifact_root),
@@ -908,7 +910,9 @@ class ProductionAttemptProcessorFactory:
             self.repository,
             self.artifact_service,
             self.redactor,
-            scm=create_scm_adapter(self.settings),
+            scm=create_scm_adapter(
+                self.settings, app_cache=self.github_app_cache
+            ),
             environment_factory=lambda spec: DockerExecutionEnvironment(
                 spec, egress_network_name=self.settings.egress_network
             ),

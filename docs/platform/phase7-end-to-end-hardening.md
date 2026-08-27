@@ -9,6 +9,7 @@ Phase 7 保持 Control API 和 Artifact 类型不变，硬化以下运行边界�
 - Worker恢复循环在数据库租约恢复后，以仍存活的 Job/Attempt ID作为白名单，只清理由 `com.mewcode.managed=true`和 `com.mewcode.attempt_id`共同标记的孤儿容器、Attempt网络和卷，以及 `state_root/attempts`下不在白名单中的固定哈希状态目录；共享 egress网络没有 Attempt标签，不在回收范围。该路径用于硬杀进程后的资源与临时归档收敛，并拒绝全局 prune。
 - `MEWCODE_PLATFORM_ATTEMPT_TIMEOUT_SECONDS` 默认且最大为3600。每个 Attempt独立计时，排队和 `NEEDS_INPUT` 不计入；超时错误码为 `ATTEMPT_DEADLINE_EXCEEDED`，清理/幂等发布对账最多额外使用30秒。
 - Repository Size按规范化固定 SHA工作树中的普通文件和symlink目标字节计算，默认上限2GiB；GitHub压缩归档下载另有2.25GiB硬上限，Executor Workspace仍为3GiB。
+- GitHub App installation token仅在进程内按 App、installation、仓库和精确权限集缓存，并在到期前60秒失效；API/Worker不把 token写入磁盘。GitHub只读请求、归档下载和 token签发对瞬时网络、429与5xx做最多3次短退避，仓库写入请求不做盲重试，仍由 Delivery分支和 Draft PR对账收敛。
 - Worker指标新增全局/本地容量、排空状态、排队数量、最老排队年龄和停机结果；readiness忽略正在排空的 Worker。
 
 容量分层的长期取舍见 [ADR 0014](../adr/0014-separate-platform-capacity-from-worker-slots.md)，通知重复边界仍以 [ADR 0013](../adr/0013-deliver-notifications-with-a-transactional-outbox.md) 为准。
