@@ -5,7 +5,7 @@ import io
 import json
 import os
 import tarfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -228,6 +228,10 @@ async def test_phase5_three_rounds_use_one_real_executor_and_leave_no_resources(
     environment_box = {}
 
     def environment_factory(spec):
+        # This gate validates the three-round production processor flow, not
+        # the default 4-CPU executor quota. GitHub-hosted runners expose only
+        # 2 CPUs, so keep the fixture portable and deliberately under quota.
+        spec = replace(spec, limits=replace(spec.limits, cpus=1.0))
         environment = DockerExecutionEnvironment(
             spec, egress_network_name=settings.egress_network
         )
