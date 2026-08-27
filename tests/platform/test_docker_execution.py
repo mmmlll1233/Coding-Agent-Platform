@@ -263,6 +263,7 @@ async def test_executor_inspect_contract_and_secret_canary(
         assert holder_attrs["HostConfig"]["NetworkMode"] == "none"
         assert holder_attrs["HostConfig"]["ReadonlyRootfs"] is True
         assert holder_attrs["HostConfig"]["CapDrop"] == ["ALL"]
+        assert holder_attrs["HostConfig"]["Init"] is True
         volume_options = environment._workspace_volume.attrs["Options"]["o"]
         assert f"size={environment.spec.limits.workspace_bytes}" in volume_options
         assert f"nr_inodes={environment.spec.limits.workspace_inodes}" in volume_options

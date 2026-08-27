@@ -47,6 +47,11 @@ _INTERNAL_ENV_NAMES = frozenset(
         "MEWCODE_TEST_ALLOWED_URL",
     }
 )
+_WORKSPACE_HELPER_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+
+class _TransientWorkspaceHelperError(ExecutionEnvironmentError):
+    """Docker has not finished releasing a recently removed process tree."""
 
 
 def _resource_suffix(spec: AttemptExecutionSpec) -> str:
@@ -476,6 +481,12 @@ class DockerExecutionEnvironment:
             self.spec.executor_image,
             name=f"mewcode-volume-holder-{self._suffix}",
             command=["sleep", "infinity"],
+            # Workspace operations use repeated ``docker exec`` calls.  A plain
+            # sleep process as PID 1 does not reap orphaned exec children on all
+            # Linux Docker hosts, so the deliberately small PID budget can be
+            # exhausted even though every helper has exited.  Docker's init
+            # process keeps the holder bounded without widening its privileges.
+            init=True,
             user="65532:65532",
             network_mode="none",
             read_only=True,
@@ -918,6 +929,14 @@ visible_hostname mewcode-egress-proxy
         inspected = api.exec_inspect(created["Id"])
         stdout = b"".join(stdout_parts)
         stderr = b"".join(stderr_parts)
+        combined = (stdout + stderr).lower()
+        if (
+            b"oci runtime exec failed" in combined
+            and b"procready not received" in combined
+        ):
+            raise _TransientWorkspaceHelperError(
+                "Docker workspace helper was temporarily unavailable"
+            )
         if not stdout:
             detail = stderr.decode(errors="replace")
             raise ExecutionEnvironmentError(
@@ -928,16 +947,25 @@ visible_hostname mewcode-egress-proxy
     async def _run_workspace_helper(self, request: dict[str, Any]) -> dict[str, Any]:
         if self.state != ExecutionState.READY:
             raise ExecutionEnvironmentError("ExecutionEnvironment is not ready")
-        try:
-            return await asyncio.to_thread(self._workspace_helper_sync, request)
-        except ExecutionEnvironmentError:
-            self.state = ExecutionState.BROKEN
-            raise
-        except Exception as exc:
-            self.state = ExecutionState.BROKEN
-            raise ExecutionEnvironmentError(
-                f"Docker workspace helper failure: {exc}"
-            ) from exc
+        for delay in (*_WORKSPACE_HELPER_RETRY_DELAYS, None):
+            try:
+                return await asyncio.to_thread(self._workspace_helper_sync, request)
+            except _TransientWorkspaceHelperError as exc:
+                if delay is None:
+                    self.state = ExecutionState.BROKEN
+                    raise ExecutionEnvironmentError(
+                        "Docker workspace helper remained unavailable"
+                    ) from exc
+                await asyncio.sleep(delay)
+            except ExecutionEnvironmentError:
+                self.state = ExecutionState.BROKEN
+                raise
+            except Exception as exc:
+                self.state = ExecutionState.BROKEN
+                raise ExecutionEnvironmentError(
+                    f"Docker workspace helper failure: {exc}"
+                ) from exc
+        raise AssertionError("Workspace helper retry loop did not terminate")
 
     async def import_archive(self, archive: bytes) -> None:
         if self.state != ExecutionState.READY:
