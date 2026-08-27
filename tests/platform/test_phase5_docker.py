@@ -160,6 +160,7 @@ class _Artifacts:
 
 async def test_phase5_three_rounds_use_one_real_executor_and_leave_no_resources(
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     job_id = uuid4()
     attempt_id = uuid4()
@@ -177,6 +178,17 @@ async def test_phase5_three_rounds_use_one_real_executor_and_leave_no_resources(
         artifact_root=str(tmp_path / "artifacts"),
         egress_network=f"mewcode-phase5-docker-{job_id.hex[:12]}",
     )
+
+    def cleanup_shared_egress() -> None:
+        import docker
+        from docker.errors import NotFound
+
+        try:
+            docker.from_env().networks.get(settings.egress_network).remove()
+        except NotFound:
+            pass
+
+    request.addfinalizer(cleanup_shared_egress)
     lease = AttemptLease(
         job_id=job_id,
         attempt_id=attempt_id,
@@ -258,7 +270,10 @@ async def test_phase5_three_rounds_use_one_real_executor_and_leave_no_resources(
             asyncio.Event(),
         ),
     )
-    assert outcome.status == AttemptOutcomeStatus.COMPLETED
+    assert outcome.status == AttemptOutcomeStatus.COMPLETED, (
+        outcome.error_code,
+        outcome.error_message,
+    )
     assert runtime_box["value"].agent.calls == 3
     assert len(scm.published) == 1
     assert set(artifact_box["value"].items) == set(ArtifactKind)

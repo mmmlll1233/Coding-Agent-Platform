@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from mewcode.conversation import ConversationManager
 from mewcode.platform.execution import (
     AttemptExecutionSpec,
+    DockerExecutionEnvironment,
     ExecutionCommand,
     ExecutionCommandOutcome,
     ExecutionEnvironmentError,
@@ -18,10 +21,11 @@ from mewcode.platform.execution import (
     WorkspacePathError,
     create_platform_registry,
 )
+from mewcode.platform.execution import docker as docker_execution
 from mewcode.platform.runtime import (
     InMemoryJobEventSink,
-    JobRunRequest,
     JobRunner,
+    JobRunRequest,
     JobRunStatus,
 )
 from mewcode.tools.base import CommandExecutionResult
@@ -77,6 +81,77 @@ def test_attempt_state_directories_are_isolated_by_identity(tmp_path) -> None:
     assert first.trusted_state_dir != retry.trusted_state_dir
     assert first.trusted_state_dir.parent == tmp_path.resolve() / "state" / "attempts"
     assert retry.trusted_state_dir.parent == first.trusted_state_dir.parent
+
+
+@pytest.mark.asyncio
+async def test_docker_workspace_helper_serializes_and_recovers_holder(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = DockerExecutionEnvironment(_spec(tmp_path))
+    environment.state = docker_execution.ExecutionState.READY
+    calls = 0
+    active = 0
+    max_active = 0
+    restarts = 0
+
+    def helper(request):
+        nonlocal calls, active, max_active
+        calls += 1
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            time.sleep(0.01)
+            if calls <= 2:
+                raise docker_execution._TransientWorkspaceHelperError("procReady")
+            return {"ok": request["value"]}
+        finally:
+            active -= 1
+
+    def restart():
+        nonlocal restarts
+        restarts += 1
+
+    monkeypatch.setattr(docker_execution, "_WORKSPACE_HELPER_RETRY_DELAYS", (0.0,))
+    monkeypatch.setattr(environment, "_workspace_helper_sync", helper)
+    monkeypatch.setattr(environment, "_restart_volume_holder_sync", restart)
+
+    first, second = await asyncio.gather(
+        environment._run_workspace_helper({"value": 1}),
+        environment._run_workspace_helper({"value": 2}),
+    )
+
+    assert first == {"ok": 1}
+    assert second == {"ok": 2}
+    assert restarts == 1
+    assert max_active == 1
+
+
+def test_docker_workspace_helper_translates_linux_exec_api_race(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = DockerExecutionEnvironment(_spec(tmp_path))
+    environment._volume_holder_container = SimpleNamespace(id="holder")
+
+    class Api:
+        @staticmethod
+        def exec_create(*args, **kwargs):
+            return {"Id": "exec"}
+
+        @staticmethod
+        def exec_start(*args, **kwargs):
+            raise RuntimeError(
+                "500 Server Error: OCI runtime exec failed: "
+                "unable to start container process: procReady not received"
+            )
+
+    monkeypatch.setattr(
+        environment,
+        "_docker",
+        lambda: SimpleNamespace(api=Api()),
+    )
+
+    with pytest.raises(docker_execution._TransientWorkspaceHelperError):
+        environment._workspace_helper_sync({"op": "glob"})
 
 
 @pytest.mark.asyncio

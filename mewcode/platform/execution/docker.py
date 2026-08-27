@@ -55,6 +55,15 @@ class _TransientWorkspaceHelperError(ExecutionEnvironmentError):
     """Docker has not finished releasing a recently removed process tree."""
 
 
+def _is_transient_workspace_helper_failure(value: object) -> bool:
+    detail = value if isinstance(value, bytes) else str(value).encode(errors="replace")
+    normalized = detail.lower()
+    return (
+        b"oci runtime exec failed" in normalized
+        and b"procready not received" in normalized
+    )
+
+
 def _resource_suffix(spec: AttemptExecutionSpec) -> str:
     raw = f"{spec.job_id}\0{spec.attempt_id}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:20]
@@ -376,6 +385,7 @@ class DockerExecutionEnvironment:
         self._volume_holder_container: Any | None = None
         self._active_container: Any | None = None
         self._command_lock = asyncio.Lock()
+        self._workspace_helper_lock = asyncio.Lock()
         self._started_monotonic: float | None = None
         self._workspace_imported = False
         self._redactor = SensitiveValueRedactor(spec.secret_values)
@@ -483,15 +493,15 @@ class DockerExecutionEnvironment:
             name=f"mewcode-volume-holder-{self._suffix}",
             command=["sleep", "infinity"],
             # Workspace operations use repeated ``docker exec`` calls.  Docker's
-            # init process reaps children, while the small trusted-helper-only
-            # PID budget leaves room for exec teardown on slower Linux hosts.
+            # init process reaps children, while the trusted-helper-only PID
+            # budget leaves room for exec teardown on slower Linux hosts.
             init=True,
             user="65532:65532",
             network_mode="none",
             read_only=True,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
-            pids_limit=32,
+            pids_limit=128,
             mem_limit=32 * MIB,
             memswap_limit=32 * MIB,
             volumes={
@@ -505,6 +515,13 @@ class DockerExecutionEnvironment:
         )
         holder.start()
         self._volume_holder_container = holder
+
+    def _restart_volume_holder_sync(self) -> None:
+        holder = self._volume_holder_container
+        self._volume_holder_container = None
+        if holder is not None:
+            holder.remove(force=True)
+        self._start_volume_holder_sync()
 
     def _squid_config(self) -> bytes:
         domains = " ".join(self.spec.egress_allowlist)
@@ -892,53 +909,58 @@ visible_hostname mewcode-egress-proxy
         if len(payload) > 16 * MIB:
             raise ExecutionEnvironmentError("Workspace helper request limit exceeded")
         api = self._docker().api
-        created = api.exec_create(
-            self._volume_holder_container.id,
-            [
-                "python",
-                "/opt/mewcode/workspace_helper.py",
-                "--stdin-size",
-                str(len(payload)),
-            ],
-            stdin=True,
-            stdout=True,
-            stderr=True,
-            user="65532:65532",
-            workdir="/workspace",
-        )
-        socket = api.exec_start(created["Id"], socket=True)
-        stdout_parts: list[bytes] = []
-        stderr_parts: list[bytes] = []
         try:
-            writer = socket if hasattr(socket, "sendall") else getattr(socket, "_sock")
-            writer.sendall(payload)
-            if isinstance(writer, stdlib_socket.socket):
-                writer.shutdown(stdlib_socket.SHUT_WR)
-            observed = 0
-            for stream, data in frames_iter(socket, tty=False):
-                observed += len(data)
-                if observed > self.spec.limits.max_output_bytes:
-                    raise ExecutionEnvironmentError(
-                        "Workspace helper output limit exceeded"
-                    )
-                if stream == STDOUT:
-                    stdout_parts.append(data)
-                elif stream == STDERR:
-                    stderr_parts.append(data)
-        finally:
-            response = getattr(socket, "_response", None)
-            if response is not None:
-                response.close()
-            else:
-                socket.close()
-        inspected = api.exec_inspect(created["Id"])
+            created = api.exec_create(
+                self._volume_holder_container.id,
+                [
+                    "python",
+                    "/opt/mewcode/workspace_helper.py",
+                    "--stdin-size",
+                    str(len(payload)),
+                ],
+                stdin=True,
+                stdout=True,
+                stderr=True,
+                user="65532:65532",
+                workdir="/workspace",
+            )
+            socket = api.exec_start(created["Id"], socket=True)
+            stdout_parts: list[bytes] = []
+            stderr_parts: list[bytes] = []
+            try:
+                writer = socket if hasattr(socket, "sendall") else socket._sock
+                writer.sendall(payload)
+                if isinstance(writer, stdlib_socket.socket):
+                    writer.shutdown(stdlib_socket.SHUT_WR)
+                observed = 0
+                for stream, data in frames_iter(socket, tty=False):
+                    observed += len(data)
+                    if observed > self.spec.limits.max_output_bytes:
+                        raise ExecutionEnvironmentError(
+                            "Workspace helper output limit exceeded"
+                        )
+                    if stream == STDOUT:
+                        stdout_parts.append(data)
+                    elif stream == STDERR:
+                        stderr_parts.append(data)
+            finally:
+                response = getattr(socket, "_response", None)
+                if response is not None:
+                    response.close()
+                else:
+                    socket.close()
+            inspected = api.exec_inspect(created["Id"])
+        except _TransientWorkspaceHelperError:
+            raise
+        except Exception as exc:
+            if _is_transient_workspace_helper_failure(exc):
+                raise _TransientWorkspaceHelperError(
+                    "Docker workspace helper was temporarily unavailable"
+                ) from exc
+            raise
         stdout = b"".join(stdout_parts)
         stderr = b"".join(stderr_parts)
-        combined = (stdout + stderr).lower()
-        if (
-            b"oci runtime exec failed" in combined
-            and b"procready not received" in combined
-        ):
+        if _is_transient_workspace_helper_failure(stdout + stderr):
             raise _TransientWorkspaceHelperError(
                 "Docker workspace helper was temporarily unavailable"
             )
@@ -952,25 +974,48 @@ visible_hostname mewcode-egress-proxy
     async def _run_workspace_helper(self, request: dict[str, Any]) -> dict[str, Any]:
         if self.state != ExecutionState.READY:
             raise ExecutionEnvironmentError("ExecutionEnvironment is not ready")
-        for delay in (*_WORKSPACE_HELPER_RETRY_DELAYS, None):
-            try:
-                return await asyncio.to_thread(self._workspace_helper_sync, request)
-            except _TransientWorkspaceHelperError as exc:
-                if delay is None:
-                    self.state = ExecutionState.BROKEN
-                    raise ExecutionEnvironmentError(
-                        "Docker workspace helper remained unavailable"
-                    ) from exc
-                await asyncio.sleep(delay)
-            except ExecutionEnvironmentError:
-                self.state = ExecutionState.BROKEN
-                raise
-            except Exception as exc:
+        async with self._workspace_helper_lock:
+            if self.state != ExecutionState.READY:
+                raise ExecutionEnvironmentError("ExecutionEnvironment is not ready")
+            last_transient: _TransientWorkspaceHelperError | None = None
+            for holder_generation in range(2):
+                for delay in (*_WORKSPACE_HELPER_RETRY_DELAYS, None):
+                    try:
+                        return await asyncio.to_thread(
+                            self._workspace_helper_sync, request
+                        )
+                    except _TransientWorkspaceHelperError as exc:
+                        last_transient = exc
+                        if delay is None:
+                            break
+                        await asyncio.sleep(delay)
+                    except ExecutionEnvironmentError:
+                        self.state = ExecutionState.BROKEN
+                        raise
+                    except Exception as exc:
+                        self.state = ExecutionState.BROKEN
+                        raise ExecutionEnvironmentError(
+                            f"Docker workspace helper failure: {exc}"
+                        ) from exc
+                if holder_generation == 0:
+                    try:
+                        await asyncio.to_thread(self._restart_volume_holder_sync)
+                    except Exception as exc:
+                        self.state = ExecutionState.BROKEN
+                        raise ExecutionEnvironmentError(
+                            "Docker workspace helper recovery failed"
+                        ) from exc
+                    continue
                 self.state = ExecutionState.BROKEN
                 raise ExecutionEnvironmentError(
-                    f"Docker workspace helper failure: {exc}"
-                ) from exc
-        raise AssertionError("Workspace helper retry loop did not terminate")
+                    "Docker workspace helper remained unavailable"
+                ) from last_transient
+            if last_transient is not None:
+                self.state = ExecutionState.BROKEN
+                raise ExecutionEnvironmentError(
+                    "Docker workspace helper remained unavailable"
+                ) from last_transient
+            raise AssertionError("Workspace helper retry loop did not terminate")
 
     async def import_archive(self, archive: bytes) -> None:
         if self.state != ExecutionState.READY:
