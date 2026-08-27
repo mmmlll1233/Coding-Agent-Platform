@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import posixpath
+import socket as stdlib_socket
 import tarfile
 import time
 from pathlib import Path, PurePosixPath
@@ -47,7 +48,7 @@ _INTERNAL_ENV_NAMES = frozenset(
         "MEWCODE_TEST_ALLOWED_URL",
     }
 )
-_WORKSPACE_HELPER_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+_WORKSPACE_HELPER_RETRY_DELAYS = (0.1, 0.2, 0.4, 0.8, 1.6)
 
 
 class _TransientWorkspaceHelperError(ExecutionEnvironmentError):
@@ -481,18 +482,16 @@ class DockerExecutionEnvironment:
             self.spec.executor_image,
             name=f"mewcode-volume-holder-{self._suffix}",
             command=["sleep", "infinity"],
-            # Workspace operations use repeated ``docker exec`` calls.  A plain
-            # sleep process as PID 1 does not reap orphaned exec children on all
-            # Linux Docker hosts, so the deliberately small PID budget can be
-            # exhausted even though every helper has exited.  Docker's init
-            # process keeps the holder bounded without widening its privileges.
+            # Workspace operations use repeated ``docker exec`` calls.  Docker's
+            # init process reaps children, while the small trusted-helper-only
+            # PID budget leaves room for exec teardown on slower Linux hosts.
             init=True,
             user="65532:65532",
             network_mode="none",
             read_only=True,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
-            pids_limit=8,
+            pids_limit=32,
             mem_limit=32 * MIB,
             memswap_limit=32 * MIB,
             volumes={
@@ -913,6 +912,8 @@ visible_hostname mewcode-egress-proxy
         try:
             writer = socket if hasattr(socket, "sendall") else getattr(socket, "_sock")
             writer.sendall(payload)
+            if isinstance(writer, stdlib_socket.socket):
+                writer.shutdown(stdlib_socket.SHUT_WR)
             observed = 0
             for stream, data in frames_iter(socket, tty=False):
                 observed += len(data)
@@ -925,7 +926,11 @@ visible_hostname mewcode-egress-proxy
                 elif stream == STDERR:
                     stderr_parts.append(data)
         finally:
-            socket.close()
+            response = getattr(socket, "_response", None)
+            if response is not None:
+                response.close()
+            else:
+                socket.close()
         inspected = api.exec_inspect(created["Id"])
         stdout = b"".join(stdout_parts)
         stderr = b"".join(stderr_parts)
