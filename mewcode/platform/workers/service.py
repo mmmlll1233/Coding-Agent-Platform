@@ -101,12 +101,26 @@ class WorkerService:
                 continue
 
     async def _recovery_loop(self) -> None:
+        cleanup_orphaned = getattr(self.processor_factory, "cleanup_orphaned", None)
         while not self._stop.is_set():
             recovered = await self.repository.recover_expired_leases()
             if recovered:
                 log.warning("Recovered %s expired Worker Lease(s)", recovered)
                 if self.metrics is not None:
                     self.metrics.lease_recoveries.inc(recovered)
+            if cleanup_orphaned is not None:
+                try:
+                    removed = await cleanup_orphaned()
+                    if any(removed):
+                        log.warning(
+                            "Removed orphan Attempt Docker resources "
+                            "containers=%s networks=%s volumes=%s",
+                            *removed,
+                        )
+                except Exception:
+                    log.exception("Orphan Attempt Docker cleanup failed")
+                    if self.metrics is not None:
+                        self.metrics.janitor_failures.inc()
             try:
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=self.settings.recovery_seconds

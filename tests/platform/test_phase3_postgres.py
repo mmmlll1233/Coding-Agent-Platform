@@ -269,6 +269,7 @@ async def test_database_capacity_and_fencing_are_enforced(database) -> None:
     )
 
     lease = claimed.lease
+    assert await repository.live_attempt_ids() == frozenset({lease.attempt_id})
     await repository.heartbeat_lease(
         attempt_id=lease.attempt_id,
         worker_id=lease.worker_id,
@@ -371,6 +372,7 @@ async def test_expired_lease_retries_once_and_rejects_stale_events(database) -> 
             .values(lease_expires_at=func.now() - text("interval '1 second'"))
         )
     assert await repository.recover_expired_leases() == 1
+    assert await repository.live_attempt_ids() == frozenset()
     with pytest.raises(LeaseLost):
         await sink.emit(
             JobEvent(
@@ -1126,6 +1128,40 @@ class _BarrierFactory:
 
     def create(self, lease: AttemptLease) -> _BarrierProcessor:
         return _BarrierProcessor(self, lease)
+
+
+class _OrphanCleanupFactory:
+    def __init__(self) -> None:
+        self.cleaned = asyncio.Event()
+
+    def create(self, lease: AttemptLease):
+        raise AssertionError("No Job should be claimed in this cleanup test")
+
+    async def cleanup_orphaned(self) -> tuple[int, int, int]:
+        self.cleaned.set()
+        return 2, 1, 3
+
+
+@pytest.mark.asyncio
+async def test_worker_recovery_loop_invokes_orphan_resource_cleanup(
+    database, postgres_settings
+) -> None:
+    repository = PlatformRepository(database)
+    factory = _OrphanCleanupFactory()
+    settings = replace(
+        postgres_settings,
+        worker_id="worker-orphan-cleanup",
+        heartbeat_seconds=1,
+        lease_seconds=5,
+        recovery_seconds=1,
+    )
+    service = WorkerService(settings, repository, factory)
+    task = asyncio.create_task(service.run_forever())
+    try:
+        await asyncio.wait_for(factory.cleaned.wait(), timeout=5)
+    finally:
+        await service.stop()
+        await asyncio.wait_for(task, timeout=5)
 
 
 @pytest.mark.asyncio

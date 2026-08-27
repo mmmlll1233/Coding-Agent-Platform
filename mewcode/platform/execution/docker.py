@@ -69,6 +69,90 @@ def _resource_suffix(spec: AttemptExecutionSpec) -> str:
     return hashlib.sha256(raw).hexdigest()[:20]
 
 
+def _attempt_resource_id(resource: Any) -> str | None:
+    labels = getattr(resource, "labels", None)
+    if not isinstance(labels, dict):
+        attrs = getattr(resource, "attrs", {})
+        labels = attrs.get("Labels") if isinstance(attrs, dict) else None
+        if not isinstance(labels, dict) and isinstance(attrs, dict):
+            config = attrs.get("Config", {})
+            labels = config.get("Labels") if isinstance(config, dict) else None
+    if not isinstance(labels, dict) or labels.get(_MANAGED_LABEL) != "true":
+        return None
+    attempt_id = labels.get(_ATTEMPT_LABEL)
+    return str(attempt_id) if attempt_id else None
+
+
+def cleanup_orphaned_attempt_resources(
+    active_attempt_ids: set[str] | frozenset[str],
+    *,
+    client: Any | None = None,
+) -> tuple[int, int, int]:
+    """Remove only MewCode Attempt resources absent from the DB live set."""
+    owned_client = client is None
+    if client is None:
+        try:
+            import docker
+        except ImportError as exc:
+            raise ExecutionCleanupError(
+                "Docker SDK is required for orphan Attempt cleanup"
+            ) from exc
+        client = docker.from_env()
+    active = {str(value) for value in active_attempt_ids}
+    filters = {"label": [f"{_MANAGED_LABEL}=true", _ATTEMPT_LABEL]}
+    removed = [0, 0, 0]
+    errors: list[str] = []
+    collections = (
+        ("container", client.containers, True),
+        ("network", client.networks, False),
+        ("volume", client.volumes, True),
+    )
+    try:
+        for index, (kind, collection, force) in enumerate(collections):
+            try:
+                resources = collection.list(
+                    all=True, filters=filters
+                ) if kind == "container" else collection.list(filters=filters)
+            except Exception as exc:
+                errors.append(f"{kind} enumeration: {exc}")
+                continue
+            for resource in resources:
+                attempt_id = _attempt_resource_id(resource)
+                if attempt_id is None or attempt_id in active:
+                    continue
+                try:
+                    if force:
+                        resource.remove(force=True)
+                    else:
+                        resource.remove()
+                    removed[index] += 1
+                except Exception as exc:
+                    errors.append(f"{kind} removal: {exc}")
+        remaining: list[str] = []
+        for kind, collection, _ in collections:
+            try:
+                resources = collection.list(
+                    all=True, filters=filters
+                ) if kind == "container" else collection.list(filters=filters)
+            except Exception as exc:
+                errors.append(f"{kind} verification: {exc}")
+                continue
+            remaining.extend(
+                f"{kind}:{attempt_id}"
+                for resource in resources
+                if (attempt_id := _attempt_resource_id(resource)) is not None
+                and attempt_id not in active
+            )
+        if remaining:
+            errors.append("orphan resources remain: " + ", ".join(sorted(remaining)))
+        if errors:
+            raise ExecutionCleanupError("; ".join(errors))
+        return removed[0], removed[1], removed[2]
+    finally:
+        if owned_client:
+            client.close()
+
+
 def _tar_bytes(
     files: dict[str, bytes], *, uid: int = 65532, gid: int = 65532
 ) -> bytes:

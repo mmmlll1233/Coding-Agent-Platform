@@ -19,6 +19,7 @@ from mewcode.platform.execution import (
     FakeExecutionEnvironment,
     SensitiveValueRedactor,
     WorkspacePathError,
+    cleanup_orphaned_attempt_resources,
     create_platform_registry,
 )
 from mewcode.platform.execution import docker as docker_execution
@@ -152,6 +153,50 @@ def test_docker_workspace_helper_translates_linux_exec_api_race(
 
     with pytest.raises(docker_execution._TransientWorkspaceHelperError):
         environment._workspace_helper_sync({"op": "glob"})
+
+
+def test_orphan_cleanup_keeps_live_attempt_and_ignores_unmanaged_resources() -> None:
+    class Resource:
+        def __init__(self, attempt_id: str | None, *, managed: bool = True) -> None:
+            self.labels = {
+                "com.mewcode.managed": str(managed).lower(),
+                **(
+                    {"com.mewcode.attempt_id": attempt_id}
+                    if attempt_id is not None
+                    else {}
+                ),
+            }
+            self.removed = False
+
+        def remove(self, *, force: bool = False) -> None:
+            self.removed = True
+
+    class Collection:
+        def __init__(self, resources) -> None:
+            self.resources = resources
+
+        def list(self, **kwargs):
+            return [item for item in self.resources if not item.removed]
+
+    live = Resource("live")
+    orphan_container = Resource("orphan")
+    orphan_network = Resource("orphan")
+    orphan_volume = Resource("orphan")
+    unmanaged = Resource("orphan", managed=False)
+    client = SimpleNamespace(
+        containers=Collection([live, orphan_container, unmanaged]),
+        networks=Collection([orphan_network]),
+        volumes=Collection([orphan_volume]),
+    )
+
+    removed = cleanup_orphaned_attempt_resources({"live"}, client=client)
+
+    assert removed == (1, 1, 1)
+    assert live.removed is False
+    assert unmanaged.removed is False
+    assert orphan_container.removed is True
+    assert orphan_network.removed is True
+    assert orphan_volume.removed is True
 
 
 @pytest.mark.asyncio

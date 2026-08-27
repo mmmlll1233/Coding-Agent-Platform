@@ -16,6 +16,7 @@ from mewcode.platform.execution import (
     ExecutionCommand,
     ExecutionLimits,
     WorkspacePathError,
+    cleanup_orphaned_attempt_resources,
     create_platform_registry,
 )
 from mewcode.tools.read_file import Params as ReadParams
@@ -420,6 +421,39 @@ async def test_timeout_removes_process_tree_but_workspace_remains_usable(
             for path in cancelled_heartbeats
         }
         assert after_cancel == before_cancel
+    finally:
+        await _close_and_assert_clean(environment)
+
+
+@pytest.mark.executor_security
+@pytest.mark.asyncio
+async def test_worker_restart_sweeps_only_orphan_attempt_resources(
+    tmp_path: Path,
+) -> None:
+    environment = _new_environment(tmp_path)
+    try:
+        await environment.start()
+        client = environment._docker()
+        attempt_id = environment.spec.attempt_id
+
+        protected = await asyncio.to_thread(
+            cleanup_orphaned_attempt_resources,
+            {attempt_id},
+            client=client,
+        )
+        assert protected == (0, 0, 0)
+
+        removed = await asyncio.to_thread(
+            cleanup_orphaned_attempt_resources,
+            set(),
+            client=client,
+        )
+        assert removed == (2, 1, 3)
+
+        filters = _labels(environment.spec.job_id, attempt_id)
+        assert client.containers.list(all=True, filters=filters) == []
+        assert client.networks.list(filters=filters) == []
+        assert client.volumes.list(filters=filters) == []
     finally:
         await _close_and_assert_clean(environment)
 

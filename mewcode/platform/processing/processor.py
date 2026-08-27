@@ -38,6 +38,7 @@ from mewcode.platform.execution import (
     ExecutionEnvironmentError,
     ExecutionLimits,
     SensitiveValueRedactor,
+    cleanup_orphaned_attempt_resources,
 )
 from mewcode.platform.persistence import PlatformRepository, StateConflict
 from mewcode.platform.runtime import (
@@ -914,6 +915,13 @@ class ProductionAttemptProcessorFactory:
 
     async def cleanup_expired(self) -> tuple[int, int]:
         return await self.artifact_service.cleanup_expired()
+
+    async def cleanup_orphaned(self) -> tuple[int, int, int]:
+        active = await self.repository.live_attempt_ids()
+        return await asyncio.to_thread(
+            cleanup_orphaned_attempt_resources,
+            {str(attempt_id) for attempt_id in active},
+        )
 
 
 def create_attempt_processor_factory(
