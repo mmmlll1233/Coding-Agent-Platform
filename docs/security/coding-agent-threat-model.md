@@ -217,7 +217,7 @@ checkout完整 SHA `ab2d15c090d22cba88fc87593d946f00cd73145d`，使用真实 Pos
 测试飞书群验证 Notification Lease恢复、第二次 Delivery Attempt成功和 secret不进入
 Outbox可观察字段。两项测试飞书 Environment secret在run结束后已删除。
 
-## 15. Phase 7 实现与待验收记录
+## 15. Phase 7 实现与本地验收记录
 
 `RES-001`、`AVAIL-001`、`CAP-001` 和 `OPS-001` 的无凭证部分已加入自动化覆盖：
 规范化 Repository Size含symlink目标并按2GiB fail closed；Attempt Processor和Executor
@@ -227,6 +227,11 @@ Outbox可观察字段。两项测试飞书 Environment secret在run结束后已�
 Attempt ID标签同时存在，状态回收器只接受 `state_root/attempts`的32位哈希直接子目录；
 两者均不触碰共享 egress网络或非平台资源。现有恶意仓库夹具继续作为安全清单，不得删除。
 
-正式本地安全结论仍为待验收：实际2GiB I/O、真实3600秒、连续20个 Job、两次真实飞书、
-PR发布后崩溃对账及空环境恢复必须在同一固定实现 SHA上完成。任何原始 secret、webhook、
-请求/响应体或日志不得进入提交的证据；服务器5并发在迁移前保持 `PENDING`。
+正式本地安全结论已于2026-08-28通过：实现 SHA
+`e1936c457054191822a86dea5da862656d0a9e93` 在常规 CI run `33071125986`和本地 gate
+`phase7-20260828T011406Z-614c8ac198b2`下完成实际2GiB/`+1`、真实3600秒、连续20个 Job、
+两次真实 LLM/飞书、执行中与 PR发布后 Worker硬杀对账、通知中断、永久 Verification失败
+Artifact及空 Compose项目恢复。凭证扫描覆盖数据库、Artifact、日志、PR和通知记录，
+427个候选文件与32个本地凭证值比对后泄漏为0；全部故障场景资源残留为0。提交证据只保留
+脱敏计数、哈希和结果，不包含原始 secret、webhook、请求/响应体或日志。服务器5并发仍在
+迁移前保持 `PENDING`，因此这里只宣告本地单并发 MVP安全验收通过。

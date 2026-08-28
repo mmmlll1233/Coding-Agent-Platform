@@ -381,13 +381,17 @@ Notifier尚未确认时崩溃的重复窗口符合记录的at-least-once语义�
 - 本地先完成单并发下的2GiB Repository Size边界、每 Attempt 60分钟 deadline、Worker崩溃、重复 API/通知/PR测试；迁移到服务器后再执行5并发压测。
 - 编写本地 Compose 运维手册、备份恢复和故障排查说明。
 
-交付状态（2026-08-26）：实现已完成，正式本地验收待运行。Platform Capacity与
+交付状态（2026-08-28）：本地单并发 MVP已完成并正式验收。Platform Capacity与
 Worker Slot已分离并带活跃 Worker一致性检查；每 Attempt可配置且最大3600秒 deadline、
 5分钟 Worker Drain、2GiB规范化 Repository Size、2.25GiB下载防护、排队/容量指标、
 停机一致备份/空环境恢复脚本、真实2GiB门禁和 fail-closed验收证据验证器均已落地。
-运行与验收说明见 `docs/platform/phase7-end-to-end-hardening.md`，本地运维见
-`docs/platform/phase7-local-operations.md`，容量取舍见 ADR 0014。正式20-Job混合负载、
-真实3600秒和备份恢复演练尚未执行；服务器5并发明确保持 `PENDING`。
+验收实现 `e1936c457054191822a86dea5da862656d0a9e93` 的常规 CI run
+`33071125986`与本地 gate `phase7-20260828T011406Z-614c8ac198b2`均通过；固定 SHA上的
+20-Job混合负载、2次真实 LLM/飞书、真实3600秒 deadline、2GiB/`+1`边界、永久失败
+Artifact和空 Compose项目恢复演练全部通过且零凭证泄漏、零资源残留。运行与完整证据见
+`docs/platform/phase7-end-to-end-hardening.md`，本地运维见
+`docs/platform/phase7-local-operations.md`，容量取舍见 ADR 0014。服务器5并发门禁仍明确
+保持 `PENDING`，迁移后完成该门禁前不得进入持续运行 Go/No-Go。
 
 验收：达到已约定的 MVP 容量基线，并通过安全测试清单。
 

@@ -43,4 +43,23 @@ uv run python scripts/phase7_capacity_gate.py `
 
 ## 验收状态
 
-代码与无凭证门禁已交付；正式2GiB、真实3600秒、20-Job混合负载、两次真实飞书及空环境恢复演练必须在实现固定 SHA上本机执行后再填写结果。目标服务器5并发保持 `PENDING`，不阻塞 Phase 7本地交付，但阻塞迁移后的持续运行 Go/No-Go。
+Phase 7 本地单并发 MVP 已于2026-08-28正式验收通过，固定的验收实现为
+`e1936c457054191822a86dea5da862656d0a9e93`。常规 CI run为
+`33071125986`，脱敏证据通过 `scripts/phase7_gate.py verify-local`，本地 gate ID为
+`phase7-20260828T011406Z-614c8ac198b2`，源证据 SHA-256为
+`614c8ac198b25d53c47cbc2547fa0e5901efb259774e58143281c57888259232`。
+
+本地验收结果：
+
+- 同一实现 SHA连续完成20个逻辑 Job，其中18个确定性模型、2个真实 LLM；固定目标 base SHA为 `2f56e5913b97c0618d0b5cd47fb20f179add6348`。同 Idempotency-Key均至少提交两次，数据库最终恰好20个 Job、22个 Attempt、489个 Event、84个 Artifact和40个已投递 Outbox，待投递为0。
+- API重启、Worker执行中硬杀、真实 Draft PR创建后落库前硬杀、通知临时不可用均恢复；20个 Job全部 `SUCCEEDED`、Verification全部成功，每个 Job恰好一个 Draft PR。取证后20个 PR全部关闭，测试分支全部删除。
+- 18个确定性终态通知由记录器无重复接收，2个真实模型 Job各投递一张真实飞书测试卡片；正常并发重复数为0。
+- Repository Size真实流式门禁接受 `2147483648`字节并拒绝 `2147483649`字节，耗时8.914秒；临时归档和 Docker资源均为0。
+- 真实 deadline配置为3600秒，非可信执行在3600.518秒停止，3601.324秒完成 `ATTEMPT_DEADLINE_EXCEEDED`终态、Artifact生成和清理，未发布 PR且零残留。
+- 永久 Verification失败保留且可下载 `diff`、`agent_log`、`command_log`和 `verification_report`，未发布 PR且零残留。
+- 停机一致备份在一次性空 Compose项目恢复，数据库计数、Artifact哈希、readiness和 Lease恢复均通过；manifest SHA-256为 `df491b34a23478c45c6867e6dacb94e90f77f4dcaac26f38aeacd05eab1cafb8`。
+- 凭证扫描覆盖数据库、Artifact、日志、PR和通知记录；扫描427个候选文件并与32个本地凭证值比对，泄漏数为0。每个故障场景结束后的 Attempt容器、网络、卷和临时归档均为0。
+
+目标服务器5并发门禁仍明确为 `PENDING`。这不影响 Phase 7本地单并发 MVP验收，
+但在服务器完成“恰好5个 Attempt同时运行、第6个保持 `QUEUED`、两批共10个 Job成功”
+之前，不得宣告迁移后的持续运行 Go/No-Go通过。
