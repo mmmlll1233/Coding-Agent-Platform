@@ -20,6 +20,8 @@ Phase 7 保持 Control API 和 Artifact 类型不变，硬化以下运行边界�
 
 PostgreSQL测试包含一个服务器门禁预演：Platform Capacity和单 Worker Slot均为5，前5个 Attempt由屏障保持 `RUNNING`，其余5个保持 `QUEUED`；释放后两批共10个 Job全部完成。该测试证明门禁逻辑，不代表目标服务器已经完成迁移或容量验收。
 
+仓库现提供正式的服务器容量执行器 `scripts/phase7_server_gate.py`。它在目标主机上创建一次性 PostgreSQL和测试专用 Worker，用真实 Docker `ExecutionEnvironment`运行两批共10个确定性 Attempt，自动生成脱敏证据并调用严格的 `verify-server`契约；不会连接生产数据库或创建真实 PR/通知。详细准备、命令、生产容量配置核对与证据路径见 `docs/platform/phase7-local-operations.md`。目标服务器已于2026-09-08通过该门禁，当前服务器容量验收状态为 `PASSED`。
+
 真实 Repository Size I/O门禁：
 
 ```powershell
@@ -37,7 +39,7 @@ uv run python scripts/phase7_capacity_gate.py `
 - API重启、Worker执行中硬杀、PR创建后落库前硬杀和通知中断均恢复。
 - 18次记录型通知无普通并发重复，2次真实飞书投递，Outbox归零。
 - 实际2GiB/`+1`边界、3600秒停止非可信工作且3630秒内完成终态、永久 Verification失败四类 Artifact、空项目备份恢复 manifest/哈希/readiness/Lease启动检查、五类凭证扫描面和逐故障零残留全部通过。
-- 服务器门禁必须明确记录为 `PENDING`，不能被省略或误报为已通过。
+- 2026-08-28封存的本地证据必须明确记录当时的服务器门禁为 `PENDING`；后续服务器门禁结果单独留证，不能回写或改造已封存的本地源证据。
 
 验证器拒绝 API key、private key、password、webhook、签名 secret、原始请求/响应体和常见凭证格式。输出只保留 Job ID、经过 SHA-256处理的 PR identity、固定 SHA、计数、摘要哈希和通过状态。真实密钥不得进入仓库、Artifact或验收 JSON。
 
@@ -60,6 +62,10 @@ Phase 7 本地单并发 MVP 已于2026-08-28正式验收通过，固定的验收
 - 停机一致备份在一次性空 Compose项目恢复，数据库计数、Artifact哈希、readiness和 Lease恢复均通过；manifest SHA-256为 `df491b34a23478c45c6867e6dacb94e90f77f4dcaac26f38aeacd05eab1cafb8`。
 - 凭证扫描覆盖数据库、Artifact、日志、PR和通知记录；扫描427个候选文件并与32个本地凭证值比对，泄漏数为0。每个故障场景结束后的 Attempt容器、网络、卷和临时归档均为0。
 
-目标服务器5并发门禁仍明确为 `PENDING`。这不影响 Phase 7本地单并发 MVP验收，
-但在服务器完成“恰好5个 Attempt同时运行、第6个保持 `QUEUED`、两批共10个 Job成功”
-之前，不得宣告迁移后的持续运行 Go/No-Go通过。
+目标服务器5并发门禁已于2026-09-08通过：全局容量和 Worker Slot均为5，最大同时
+`RUNNING` 为5，第6个 Job观测为 `QUEUED`，两批共10个确定性 Job全部成功，失败数和
+门禁结束后的 Docker容器、网络、卷残留均为0。脱敏输入证据 SHA-256为
+`c7d8384ec8db252207d1fc83dab2dd6d1907cade1e5398dec083fd2dd7e5cd87`，摘要 SHA-256为
+`b18ee00d948130d26c3bb7c444be7f1df386516da355e12917f707adadf8a4f5`，并已再次通过
+`scripts/phase7_gate.py verify-server`严格验证。该结果完成服务器容量 Go/No-Go；生产
+Compose的容量环境变量、真实凭证和持续运行服务仍需在正式启服时单独核对。

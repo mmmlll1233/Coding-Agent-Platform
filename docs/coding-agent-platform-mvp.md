@@ -390,8 +390,12 @@ Worker Slot已分离并带活跃 Worker一致性检查；每 Attempt可配置且
 20-Job混合负载、2次真实 LLM/飞书、真实3600秒 deadline、2GiB/`+1`边界、永久失败
 Artifact和空 Compose项目恢复演练全部通过且零凭证泄漏、零资源残留。运行与完整证据见
 `docs/platform/phase7-end-to-end-hardening.md`，本地运维见
-`docs/platform/phase7-local-operations.md`，容量取舍见 ADR 0014。服务器5并发门禁仍明确
-保持 `PENDING`，迁移后完成该门禁前不得进入持续运行 Go/No-Go。
+`docs/platform/phase7-local-operations.md`，容量取舍见 ADR 0014。服务器5并发门禁已于
+2026-09-08通过：最大同时运行5个 Attempt、第6个保持排队、两批共10个 Job全部成功且
+Docker资源零残留；脱敏输入与摘要证据 SHA-256分别为
+`c7d8384ec8db252207d1fc83dab2dd6d1907cade1e5398dec083fd2dd7e5cd87`和
+`b18ee00d948130d26c3bb7c444be7f1df386516da355e12917f707adadf8a4f5`。服务器容量
+Go/No-Go已完成，生产 Compose配置和真实凭证仍需在正式启服时单独核对。
 
 验收：达到已约定的 MVP 容量基线，并通过安全测试清单。
 

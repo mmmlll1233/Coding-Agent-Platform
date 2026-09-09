@@ -99,4 +99,48 @@ uv run python scripts/phase7_gate.py verify-local `
   .mewcode/phase7-evidence/summary.json
 ```
 
-服务器迁移后另以全局容量5、Worker Slot总和至少5运行10个确定性 Job；必须观测5个同时 `RUNNING`、第6个 `QUEUED`、两批全部成功和零残留，再用 `verify-server`验证证据。在此之前服务器状态保持 `PENDING`。
+服务器迁移后使用仓库内正式执行器验证该主机能承载全局容量5和至少5个 Worker Slot。执行器会创建一次性 PostgreSQL，启动一个测试专用的真实 `WorkerService`，并让10个确定性 Job进入真实 Docker `ExecutionEnvironment`；它不连接生产数据库，也不调用 LLM、GitHub或飞书。成功必须观测5个同时 `RUNNING`、第6个 `QUEUED`、两批全部完成和零 Docker残留。它验证的是服务器资源与平台容量控制，不会自动检查生产 Compose中的环境变量是否已设为5；生产 Worker配置仍需按下文人工核对。
+
+先在服务器的仓库 checkout 中准备固定镜像：
+
+```bash
+docker build -f docker/executor/Dockerfile -t mewcode-executor:phase7-server .
+docker pull ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+docker pull postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+export MEWCODE_EXECUTOR_IMAGE="$(docker image inspect mewcode-executor:phase7-server --format '{{.Id}}')"
+export MEWCODE_PROXY_IMAGE="$(docker image inspect ubuntu/squid@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c --format '{{.Id}}')"
+uv sync --frozen
+```
+
+再运行门禁：
+
+```bash
+uv run python scripts/phase7_server_gate.py
+```
+
+也可显式传入镜像和路径：
+
+```bash
+uv run python scripts/phase7_server_gate.py \
+  --executor-image "$MEWCODE_EXECUTOR_IMAGE" \
+  --proxy-image "$MEWCODE_PROXY_IMAGE" \
+  --local-slots 5 \
+  --evidence .mewcode/phase7-evidence/server-input.json \
+  --summary .mewcode/phase7-evidence/server-summary.json
+```
+
+脚本只在 `scripts/phase7_gate.py verify-server`同一严格契约通过后写出 `server-summary.json`；每次开始运行会先删除同路径的旧 summary，避免失败重跑后误把旧 `PASSED`当作当前结果。`server-input.json`只包含容量计数和布尔结果，不包含数据库口令、API Key、原始日志或请求正文。运行中断时会按本次 Job标签清理 Attempt容器、网络和卷，并删除本次专用 PostgreSQL容器与卷；不要用 `docker system prune`代替该清理流程。
+
+正式部署还要在 Compose环境文件中设置并核对：
+
+```text
+MEWCODE_PLATFORM_MAX_CONCURRENT_JOBS=5
+MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS=5
+```
+
+若部署多个 Worker，各 Worker的 `MEWCODE_PLATFORM_WORKER_MAX_CONCURRENT_ATTEMPTS`之和至少为5，且每个 Worker使用相同的全局容量5；变更前先按“排空与部署”一节排空 Worker。
+
+服务器至少需要 Docker Linux Engine、cgroup v2、可运行5个默认上限为4 CPU/6 GiB内存的 Attempt，以及足够的 Docker磁盘空间。Docker内存限制不是预分配，但正式门禁期间仍建议提供至少32 GiB可用内存并避免其他高负载任务。门禁通过前服务器状态保持 `PENDING`；通过后保留以下两个脱敏文件作为验收证据：
+
+- `.mewcode/phase7-evidence/server-input.json`
+- `.mewcode/phase7-evidence/server-summary.json`
