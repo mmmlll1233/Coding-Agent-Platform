@@ -1047,20 +1047,32 @@ async def test_phase6_notifier_database_role_cannot_modify_business_tables(
                     "'mewcode_notifier', 'notification_outbox', 'UPDATE')"
                 )
             ) is True
-            for column in ("id", "job_id", "status"):
+            returning_columns = (
+                "status",
+                "attempt_count",
+                "next_attempt_at",
+                "created_at",
+                "updated_at",
+            )
+            for role, columns in (
+                ("mewcode_api", returning_columns),
+                ("mewcode_worker", ("id", "job_id", *returning_columns)),
+            ):
+                for column in columns:
+                    assert await connection.scalar(
+                        text(
+                            "SELECT has_column_privilege("
+                            ":role, 'notification_outbox', :column, 'SELECT')"
+                        ),
+                        {"role": role, "column": column},
+                    ) is True
                 assert await connection.scalar(
                     text(
                         "SELECT has_column_privilege("
-                        "'mewcode_worker', 'notification_outbox', :column, 'SELECT')"
+                        ":role, 'notification_outbox', 'payload', 'SELECT')"
                     ),
-                    {"column": column},
-                ) is True
-            assert await connection.scalar(
-                text(
-                    "SELECT has_column_privilege("
-                    "'mewcode_worker', 'notification_outbox', 'payload', 'SELECT')"
-                )
-            ) is False
+                    {"role": role},
+                ) is False
     finally:
         async with database.engine.begin() as connection:
             for role in reversed(created):

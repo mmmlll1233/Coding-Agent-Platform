@@ -198,8 +198,14 @@ async def _grant_runtime_roles(settings: PlatformSettings) -> int:
         "GRANT DELETE ON jobs TO mewcode_worker",
         "GRANT SELECT ON job_inputs TO mewcode_worker",
         "GRANT INSERT ON notification_outbox TO mewcode_api, mewcode_worker",
-        "GRANT SELECT (status, created_at) ON notification_outbox TO mewcode_api",
-        "GRANT SELECT (id, job_id, status) ON notification_outbox TO mewcode_worker",
+        (
+            "GRANT SELECT (status, attempt_count, next_attempt_at, created_at, "
+            "updated_at) ON notification_outbox TO mewcode_api"
+        ),
+        (
+            "GRANT SELECT (id, job_id, status, attempt_count, next_attempt_at, "
+            "created_at, updated_at) ON notification_outbox TO mewcode_worker"
+        ),
         "GRANT SELECT, UPDATE ON notification_outbox TO mewcode_notifier",
         "GRANT SELECT, INSERT, UPDATE ON worker_nodes TO mewcode_notifier",
     )
